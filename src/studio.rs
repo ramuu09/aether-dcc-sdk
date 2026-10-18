@@ -98,6 +98,7 @@ pub fn launch() {
     println!("{TITLE}");
     println!("Hotkeys: 0-9 load a digit, N noise, G GhostVault, C clear. Left paint +1, right paint -1.");
     let mut msg: Msg = unsafe { std::mem::zeroed() };
+    // GetMessageW blocks. There is no WM_TIMER and no idle contention loop.
     loop {
         let code = unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) };
         if code == 0 {

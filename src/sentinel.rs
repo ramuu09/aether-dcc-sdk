@@ -1,15 +1,15 @@
 //! Continuous-timing telemetry classifier.
 //!
-//! The sensor thread, not the caller, is pinned to CPU 0. The timed window is
-//! still an RDTSC `lock xadd` hammer. The settle that precedes it is outside
-//! that window so a preempted synapse can enter the phase.
+//! Workers are unpinned and below normal priority. Between sweeps they park.
+//! The timed window is still an RDTSC `lock xadd` hammer, bounded to one
+//! sample per channel.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::MutexGuard;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::cpu_alu::{SENSOR_CPU, SYNAPSE_CPUS};
+use crate::cpu_alu::SYNAPSE_CPUS;
 use crate::machine::{cpu_lock, elevate};
 
 const PHASE_IDLE: u32 = 0;
@@ -63,14 +63,13 @@ pub const SCENARIOS: [Scenario; 8] = [
 #[link(name = "kernel32", kind = "raw-dylib")]
 extern "system" {
     fn GetCurrentThread() -> *mut core::ffi::c_void;
-    fn SetThreadAffinityMask(thread: *mut core::ffi::c_void, mask: usize) -> usize;
     fn SetThreadPriority(thread: *mut core::ffi::c_void, priority: i32) -> i32;
     fn VirtualAlloc(addr: *mut core::ffi::c_void, size: usize, kind: u32, protect: u32) -> *mut core::ffi::c_void;
     fn VirtualFree(addr: *mut core::ffi::c_void, size: usize, kind: u32) -> i32;
     fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
 }
 
-const THREAD_PRIORITY_HIGHEST: i32 = 2;
+const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
 
 #[repr(C, align(256))]
 struct ChannelLine {
@@ -133,15 +132,9 @@ pub struct ClassReading {
     pub latency_us: f64,
 }
 
-fn pin(cpu: usize) {
+fn demote_worker() {
     unsafe {
-        let handle = GetCurrentThread();
-        if SetThreadAffinityMask(handle, 1usize << cpu) == 0 {
-            panic!("SetThreadAffinityMask failed for cpu {cpu}");
-        }
-        if SetThreadPriority(handle, THREAD_PRIORITY_HIGHEST) == 0 {
-            panic!("SetThreadPriority failed for cpu {cpu}");
-        }
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
 }
 
@@ -253,8 +246,8 @@ fn sweep_bank(bank: &CacheBank) -> ([f64; 4], f64) {
     (raw, race_acc / race_n)
 }
 
-fn synapse_worker(addr: usize, index: usize, cpu: usize) {
-    pin(cpu);
+fn synapse_worker(addr: usize, index: usize, _cpu: usize) {
+    demote_worker();
     let bank = unsafe { &*(addr as *const CacheBank) };
     let control = &bank.control;
     let slot = &bank.synapses[index];
@@ -317,7 +310,7 @@ fn synapse_worker(addr: usize, index: usize, cpu: usize) {
 }
 
 fn sensor_worker(addr: usize) {
-    pin(SENSOR_CPU);
+    demote_worker();
     let bank = unsafe { &*(addr as *const CacheBank) };
     let control = &bank.control;
     control.sensor_ready.store(1, Ordering::Release);
@@ -328,7 +321,7 @@ fn sensor_worker(addr: usize) {
         }
         let job = control.sweep_req.load(Ordering::Acquire);
         if job == seen {
-            pause();
+            thread::park();
             continue;
         }
         let (raw, race_us) = sweep_bank(bank);
@@ -483,9 +476,10 @@ impl Sentinel {
         }
         let control = unsafe { &(*self.page).control };
         control.sweep_req.store(job, Ordering::Release);
+        self.threads[0].thread().unpark();
         let start = Instant::now();
         while control.sweep_done.load(Ordering::Acquire) != job {
-            pause();
+            thread::sleep(Duration::from_millis(1));
             if start.elapsed().as_millis() > 8_000 {
                 return Err("sentinel sweep timed out".into());
             }
@@ -536,7 +530,7 @@ impl Sentinel {
         let control = unsafe { &(*self.page).control };
         let start = Instant::now();
         while control.asleep.load(Ordering::Acquire) < N_SYNAPSES as u32 {
-            pause();
+            thread::sleep(Duration::from_millis(1));
             if start.elapsed().as_millis() > 4_000 {
                 return Err("sentinel synapses did not park".into());
             }
@@ -548,7 +542,7 @@ impl Sentinel {
         let control = unsafe { &(*self.page).control };
         let start = Instant::now();
         while control.ready.load(Ordering::Acquire) < N_SYNAPSES as u32 {
-            pause();
+            thread::sleep(Duration::from_millis(1));
             if start.elapsed().as_millis() > 4_000 {
                 return Err("sentinel synapses missed the epoch".into());
             }
@@ -560,9 +554,9 @@ impl Sentinel {
         let control = unsafe { &(*self.page).control };
         let start = Instant::now();
         while control.sensor_ready.load(Ordering::Acquire) == 0 {
-            pause();
+            thread::sleep(Duration::from_millis(1));
             if start.elapsed().as_millis() > 4_000 {
-                return Err("sentinel sensor did not pin".into());
+                return Err("sentinel sensor did not start".into());
             }
         }
         Ok(())

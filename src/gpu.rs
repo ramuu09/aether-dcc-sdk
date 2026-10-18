@@ -255,10 +255,6 @@ fn adapter_rank(name: &str) -> u8 {
     }
 }
 
-fn compile_hlsl(source: &str, name: &str) -> *mut c_void {
-    compile_hlsl_flags(source, name, D3DCOMPILE_SKIP_OPTIMIZATION)
-}
-
 fn compile_hlsl_flags(source: &str, name: &str, flags: u32) -> *mut c_void {
     let name_c = c_str(name);
     let entry = c_str("cs_main");
@@ -298,27 +294,60 @@ fn compile_hlsl_flags(source: &str, name: &str, flags: u32) -> *mut c_void {
     if !errors.is_null() {
         unsafe { release(errors) };
     }
-    let bytecode: unsafe extern "system" fn(*mut c_void) -> *const u8 = unsafe { vfn(code, 3) };
-    let get_size: unsafe extern "system" fn(*mut c_void) -> usize = unsafe { vfn(code, 4) };
-    let size = unsafe { get_size(code) };
-    let ptr = unsafe { bytecode(code) };
-    let _ = (ptr, size);
     code
 }
 
-fn create_cs(device: *mut c_void, blob: *mut c_void) -> *mut c_void {
+fn blob_bytes(blob: *mut c_void) -> Vec<u8> {
     let bytecode: unsafe extern "system" fn(*mut c_void) -> *const u8 = unsafe { vfn(blob, 3) };
     let get_size: unsafe extern "system" fn(*mut c_void) -> usize = unsafe { vfn(blob, 4) };
-    let ptr = unsafe { bytecode(blob) };
     let size = unsafe { get_size(blob) };
+    let ptr = unsafe { bytecode(blob) };
+    unsafe { std::slice::from_raw_parts(ptr, size).to_vec() }
+}
+
+fn shader_digest(source: &str, flags: u32) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64 ^ u64::from(flags);
+    for byte in source.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn shader_bytes(source: &str, name: &str, flags: u32) -> Vec<u8> {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Vec<(String, u32, Vec<u8>)>> = Mutex::new(Vec::new());
+    let mut cache = CACHE.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some((_, _, bytes)) = cache.iter().find(|(cached_name, cached_flags, _)| cached_name == name && *cached_flags == flags) {
+        return bytes.clone();
+    }
+    let digest = shader_digest(source, flags);
+    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("shader-cache");
+    let _ = std::fs::create_dir_all(&path);
+    path.push(format!("{name}-{flags:x}-{digest:016x}.bin"));
+    if let Ok(bytes) = std::fs::read(&path) {
+        if bytes.len() > 16 {
+            cache.push((name.to_string(), flags, bytes.clone()));
+            return bytes;
+        }
+    }
+    let blob = compile_hlsl_flags(source, name, flags);
+    let bytes = blob_bytes(blob);
+    unsafe { release(blob) };
+    let _ = std::fs::write(&path, &bytes);
+    cache.push((name.to_string(), flags, bytes.clone()));
+    bytes
+}
+
+fn create_cs(device: *mut c_void, bytes: &[u8]) -> *mut c_void {
     let mut shader = std::ptr::null_mut();
     let create: unsafe extern "system" fn(*mut c_void, *const u8, usize, *mut c_void, *mut *mut c_void) -> i32 =
         unsafe { vfn(device, 18) };
     check(
-        unsafe { create(device, ptr, size, std::ptr::null_mut(), &mut shader) },
+        unsafe { create(device, bytes.as_ptr(), bytes.len(), std::ptr::null_mut(), &mut shader) },
         "CreateComputeShader",
     );
-    unsafe { release(blob) };
     shader
 }
 
@@ -764,16 +793,16 @@ impl GpuEngine {
         if !self.simd_shader.is_null() {
             return;
         }
-        let blob = compile_hlsl(&simd_shader(), "dcc_stress_simd.hlsl");
-        self.simd_shader = create_cs(self.device, blob);
+        let bytes = shader_bytes(&simd_shader(), "dcc_stress_simd.hlsl", D3DCOMPILE_SKIP_OPTIMIZATION);
+        self.simd_shader = create_cs(self.device, &bytes);
     }
 
     fn ensure_vision(&mut self) {
         if !self.vision_shader.is_null() {
             return;
         }
-        let blob = compile_hlsl(&vision_shader(), "dcc_stress_vision.hlsl");
-        self.vision_shader = create_cs(self.device, blob);
+        let bytes = shader_bytes(&vision_shader(), "dcc_stress_vision.hlsl", D3DCOMPILE_SKIP_OPTIMIZATION);
+        self.vision_shader = create_cs(self.device, &bytes);
     }
 
     fn ensure_ising(&mut self) {
@@ -784,8 +813,8 @@ impl GpuEngine {
         let _ = std::io::Write::flush(&mut std::io::stdout());
         let source = ising_shader();
         ising_contract(&source);
-        let blob = compile_hlsl(&source, "dcc_stress_ising.hlsl");
-        self.ising_shader = create_cs(self.device, blob);
+        let bytes = shader_bytes(&source, "dcc_stress_ising.hlsl", D3DCOMPILE_SKIP_OPTIMIZATION);
+        self.ising_shader = create_cs(self.device, &bytes);
     }
 
     unsafe fn upload(&self, buffer: *mut c_void, bytes: *const u8, len: usize) {
@@ -828,6 +857,7 @@ impl GpuEngine {
         let out = slice.to_vec();
         unmap(self.context, staging, 0);
         let us = started.elapsed().as_secs_f64() * 1.0e6;
+        crate::ThermalGovernor::after_dispatch();
         (out, us)
     }
 
@@ -930,8 +960,8 @@ impl GpuEngine {
             return;
         }
         let source = include_str!("shaders/bitnet_digit.hlsl");
-        let blob = compile_hlsl_flags(source, "bitnet_digit.hlsl", 0);
-        self.bitnet_shader = create_cs(self.device, blob);
+        let bytes = shader_bytes(source, "bitnet_digit.hlsl", 0);
+        self.bitnet_shader = create_cs(self.device, &bytes);
     }
 
     pub fn bitnet(&mut self, pixels: &[f32; 64]) -> BitnetSample {

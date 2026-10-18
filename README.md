@@ -84,7 +84,8 @@ On the release host, script `0` returned `622`, script `1` returned `0`, and scr
 
 ## Architecture
 
-- **Quaternary ALU.** A sensor thread on CPU 0 and three synapse threads on CPUs 2, 4, and 6 run `lock xadd` on a 4096-byte `VirtualAlloc` page. Each channel is 256 bytes. The positive bank sits at the start of the channel and the negative bank sits 64 bytes later. Pedestal 4 and burst 4 produce the plateaus −0.600, −0.200, +0.200, and +0.600, read as magnitudes −3, −1, +1, and +3. The ratio is `Y = (t_pos − t_neg) / (t_pos + t_neg)`. A 0/0 measurement is +0.000, never NaN. Instructions are ADD, SUB, AND, OR, XOR, CMP, and JNZ (the CMP zero flag).
+- **Quaternary ALU.** One sensor thread and three synapse threads run `lock xadd` on a 4096-byte `VirtualAlloc` page. They are unpinned, sit at below-normal priority, and wait on a condition variable between jobs. Each channel is 256 bytes. The positive bank sits at the start of the channel and the negative bank sits 64 bytes later. Pedestal 4 and burst 4 produce the plateaus −0.600, −0.200, +0.200, and +0.600, read as magnitudes −3, −1, +1, and +3. The ratio is `Y = (t_pos − t_neg) / (t_pos + t_neg)`. A 0/0 measurement is +0.000, never NaN. Instructions are ADD, SUB, AND, OR, XOR, CMP, and JNZ (the CMP zero flag).
+- **One-sided preemption ablation.** Three estimators read the same five symbols. The harness injects one synthetic stall of 5,000,000 ticks onto the negative rail of group 0 in each of 500 trials. It does not spawn burn threads. `NaiveRailSumEstimator` adds every group into the two rails. `ChopperPreemptionGatedEstimator` drops a group whose energy exceeds 3.5 times the clean-group baseline and takes the median of the remaining per-group ratios. `WorkConservingTurnEstimator` is one parked ALU probe per symbol: the counter advances on a completed `lock xadd`, so the synthetic stall is absent from `Y`. The measured table is in the benchmark section. The proof is in [WHITE_PAPER.md](WHITE_PAPER.md).
 - **DCC-BitNet.** One `cs_5_0` dispatch, 64 threads, maps 64 pixels through 16 ternary hidden neurons to 10 digit classes. A zero weight skips `InterlockedAdd`. An empty canvas (every pixel −1) scores +0 on all ten classes and is reported as `BLANK / NO_SIGNAL`.
 - **GhostVault.** `VEC_XOR16` then `VEC_ADD16` on the UHD compute shader. Steady-state block latency is measured in the fuzzer, separately from the cold-start ABI call that also creates the device.
 - **Paradox and Ising.** An odd liar ring settles in one ALU pass at `Y = +0.000`. The same GPU runs a 64-node, degree-8 Ising relaxation. Energy is the sum of `s_i * s_j` over edges. A pass requires GPU energy at or below the binary greedy energy.
@@ -93,7 +94,34 @@ The theory and the drift-cancellation proof are in [WHITE_PAPER.md](WHITE_PAPER.
 
 ## Benchmark
 
-Host: Intel i5-10210U, DXGI adapter `Intel(R) UHD Graphics`, vendor `0x8086`, device `0x9B41`, feature level 11.1. Numbers are from `cargo run --release -- --product-benchmark` on 2026-10-18. Latencies are microseconds.
+Host: Intel i5-10210U, DXGI adapter `Intel(R) UHD Graphics`, vendor `0x8086`, device `0x9B41`, feature level 11.1. The cool table is the warm `cargo run --release -- --product-benchmark` on 2026-10-18 (command wall clock 0.88 s, exit 0). Latencies are microseconds. The retired table under it is the earlier long hostile campaign on the same date. That campaign is not what the command prints now.
+
+| Scenario | Ops/Cycles | Latency p50 / p99 µs | Errors | Status |
+| --- | ---: | ---: | ---: | --- |
+| Cool sentinel pass | 189 | 379.0 / 13,618.4 | 1 | PASS |
+| Endurance, 32 cycles | 32 | 39.9 / 1,663.8 | 0 | PASS |
+| CPU + UHD collision | 8 | 497.6 / 2,247.7 | 0 | PASS |
+| Adversarial fuzzer, 32 ops | 49 | 40.5 / 2,234.0 | 0 | PASS |
+| Vision noise cliff | 10 | 1,025.9 / 1,722.5 | 0 | PASS |
+| Paradox and Ising graphs | 221 | 70.3 / 1,752.2 | 0 | PASS |
+
+Six of six scenarios passed. The one error on the sentinel row is a class miss (`Nominal quiet, auth on` read `SPOOFED_TELEMETRY_ANOMALY`). Bit errors on that row were 0. The pass rule allows at most one class miss. The fuzzer compared 1,367 bits at 0.000000% BER. Endurance kept the four plateaus, full-scale counts 12/0, 0/12, and 4/4, with 0 deadlocks and 0 overflows. BitNet matched the host (p50 438.0 µs, p99 1,257.2 µs): 10/10 clean glyphs, and 1/1 at 12 flips. `cargo test --release -- --test-threads=1` finished 9 passed, 0 failed, in 0.60 s once `shader-cache/` held the Ising bytecode. The process that compiled and wrote that cache finished in 40.55 s. With the studio window open and idle, the process accumulated 0.000 ms of processor time across an 800 ms sample.
+
+### One-sided preemption ablation
+
+`cargo run --release -- --product-benchmark` prints this table after the six scenarios. The cool process printed `product pillars bitnet PASS stress PASS ablation PASS`, `elapsed 0.823 ms`, and `CPU burn threads 0`. Each of 500 trials receives one 5,000,000-tick stall on the negative rail of group 0. The turn row is five parked ALU probes. Plateau centers are the median \(Y\) of each symbol. The naive medians sit near −1 because the stall is on every trial. The −3 class still decodes correctly, which is why the symbol-error rate is 80% and not 100%.
+
+| Estimator | Median Y (−3, −1, 0, +1, +3) | Symbol errors |
+| :--- | :---: | :---: |
+| Naive cumulative rail-sum | −0.997, −0.994, −0.997, −0.990, −0.987 | 400 / 500 (80.000000%, BER 40.000000%) |
+| Chopper + denominator gate | −0.600, −0.200, +0.000, +0.200, +0.600 | 0 / 500 (0.000000%, BER 0.000000%) |
+| Work-conserving turn pedestal | −0.600, −0.200, +0.000, +0.200, +0.600 | 0 / 500 (0.000000%, BER 0.000000%) |
+
+The same binary's release test `test_pillar6_preemption_ablation_naive_vs_hardened` printed the same three rates, elapsed 0.996 ms.
+
+Retired live windows, same date, before the thermal patch. They are not the cells above. The product-benchmark window of that binary printed naive 1,239 / 10,000 (12.390%, BER 8.030000%) and 0 / 10,000 on the chopper and the turn pedestal, at CPU busy 100.0%. Its release test printed naive 2,304 / 10,000 (23.040%, BER 12.826667%) and again 0 / 10,000 on the other two rows, and the suite finished in 235.70 s. An earlier sum of every micro-slice duration, outside this crate, measured 4,266 / 10,000 (42.660%).
+
+Retired scorecard from the long hostile release-report process:
 
 | Scenario | Ops/Cycles | Latency p50 / p99 µs | Errors | Status |
 | --- | ---: | ---: | ---: | --- |
@@ -103,8 +131,6 @@ Host: Intel i5-10210U, DXGI adapter `Intel(R) UHD Graphics`, vendor `0x8086`, de
 | Adversarial ALU fuzzer | 50,513 | 5.1 / 22.2 | 0 | PASS |
 | Vision noise cliff | 322 | 941.3 / 1,181.8 | 0 | PASS |
 | Paradox and Ising graphs | 221 | 1.1 / 2,063.2 | 0 | PASS |
-
-Six of six scenarios passed. The fuzzer compared 1,014,247 bits at 0.000000% BER. CPU busy during the hostile storm was 100.0%. Endurance kept the four plateaus in every 2,000-cycle bucket, with 0 deadlocks and 0 overflows. BitNet matched the host on every trial in that run (p50 164.9 µs, p99 411.1 µs): 10/10 clean glyphs, and 40/40 at 12 flips (18.75% of the canvas). `cargo test --release -- --test-threads=1` passed the same six scenarios plus the BitNet test, 7 passed, 0 failed, in 47.09 s.
 
 ## Layout
 
@@ -118,6 +144,7 @@ aether-dcc-sdk/
 └── src/
     ├── lib.rs
     ├── main.rs
+    ├── estimator_ablation.rs
     ├── studio.rs
     └── shaders/
         ├── bitnet_digit.hlsl

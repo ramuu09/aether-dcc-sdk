@@ -1,17 +1,19 @@
-//! Quaternary `lock xadd` ALU on logical CPUs 0, 2, 4, and 6.
+//! Quaternary `lock xadd` ALU.
 //!
 //! Pedestal 4 produces the studio plateaus. Pedestal 0 produces full-scale ±1
-//! and the cancelling paradox pair. The sensor thread is the only one pinned
-//! to CPU 0.
+//! and the cancelling paradox pair. Workers stay at below-normal priority,
+//! unpinned, and parked on a condvar between jobs so logical CPU 0 is left
+//! to the desktop.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU32, AtomicU8, Ordering};
-use std::sync::MutexGuard;
+use std::sync::atomic::{AtomicI8, AtomicU32, AtomicU8, Ordering};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::machine::{cpu_lock, elevate};
 
+#[allow(dead_code)]
 pub const SENSOR_CPU: usize = 0;
 pub const SYNAPSE_CPUS: [usize; 3] = [2, 4, 6];
 pub const BURST: u32 = 4;
@@ -25,14 +27,13 @@ const MEM_COMMIT: u32 = 0x1000;
 const MEM_RESERVE: u32 = 0x2000;
 const MEM_RELEASE: u32 = 0x8000;
 const PAGE_READWRITE: u32 = 0x04;
-const THREAD_PRIORITY_HIGHEST: i32 = 2;
-const SPIN_TIMEOUT_MS: u128 = 8_000;
+const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+const TURN_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 extern "system" {
     fn GetCurrentThread() -> *mut c_void;
     fn GetCurrentProcess() -> *mut c_void;
-    fn SetThreadAffinityMask(thread: *mut c_void, mask: usize) -> usize;
     fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32;
     fn VirtualAlloc(addr: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
     fn VirtualFree(addr: *mut c_void, size: usize, kind: u32) -> i32;
@@ -72,20 +73,20 @@ const _: () = assert!(std::mem::size_of::<Channel>() == CHANNEL_STRIDE);
 const _: () = assert!(std::mem::size_of::<Page>() == PAGE_BYTES);
 const _: () = assert!(std::mem::offset_of!(Channel, neg) == 64);
 
-#[repr(C, align(64))]
-struct PaddedU32 {
-    value: AtomicU32,
+struct TurnState {
+    shutdown: bool,
+    ready: u32,
+    job: u32,
+    finished: u32,
+    token: u32,
+    acks: [u32; 3],
 }
 
 struct Control {
-    shutdown: AtomicBool,
-    ready: AtomicU32,
-    job: AtomicU32,
-    finished: AtomicU32,
+    turn: Mutex<TurnState>,
+    cv: Condvar,
     mask: AtomicU32,
     pedestal: AtomicU32,
-    token: PaddedU32,
-    acks: [PaddedU32; 3],
     drives: [[AtomicI8; CHANNELS]; 3],
     t_pos: [AtomicU32; CHANNELS],
     t_neg: [AtomicU32; CHANNELS],
@@ -162,31 +163,14 @@ fn bipolar(bit: u8) -> i8 {
     if bit == 0 { -1 } else { 1 }
 }
 
-fn pin(cpu: usize) {
+fn demote_worker() {
     unsafe {
-        let handle = GetCurrentThread();
-        if SetThreadAffinityMask(handle, 1usize << cpu) == 0 {
-            panic!("SetThreadAffinityMask failed for cpu {cpu}");
-        }
-        if SetThreadPriority(handle, THREAD_PRIORITY_HIGHEST) == 0 {
-            panic!("SetThreadPriority failed for cpu {cpu}");
-        }
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
 }
 
-fn pause() {
-    core::arch::x86_64::_mm_pause();
-}
-
-fn spin_until(mut ready: impl FnMut() -> bool, label: &str) -> Result<(), String> {
-    let start = Instant::now();
-    while !ready() {
-        pause();
-        if start.elapsed().as_millis() > SPIN_TIMEOUT_MS {
-            return Err(format!("{label} timed out after {SPIN_TIMEOUT_MS} ms"));
-        }
-    }
-    Ok(())
+fn lock_turn(control: &Control) -> std::sync::MutexGuard<'_, TurnState> {
+    control.turn.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
 fn active_planes(mask: u32) -> impl Iterator<Item = usize> {
@@ -194,36 +178,40 @@ fn active_planes(mask: u32) -> impl Iterator<Item = usize> {
 }
 
 fn sensor_worker(page: usize, control: usize) {
-    pin(SENSOR_CPU);
+    demote_worker();
     let page = page as *mut Page;
     let control = unsafe { &*(control as *const Control) };
-    control.ready.fetch_add(1, Ordering::Release);
+    {
+        let mut state = lock_turn(control);
+        state.ready += 1;
+        control.cv.notify_all();
+    }
     let mut seen_job = 0u32;
     loop {
-        if control.shutdown.load(Ordering::Acquire) {
-            control.token.value.store(STEP_SHUTDOWN, Ordering::Release);
-            let _ = spin_until(
-                || {
-                    control
-                        .acks
-                        .iter()
-                        .all(|ack| ack.value.load(Ordering::Acquire) == STEP_SHUTDOWN)
-                },
-                "sensor shutdown",
-            );
+        let mut state = lock_turn(control);
+        while state.job == seen_job && !state.shutdown {
+            state = control.cv.wait(state).unwrap_or_else(|poison| poison.into_inner());
+        }
+        if state.shutdown {
+            state.token = STEP_SHUTDOWN;
+            control.cv.notify_all();
+            while state.acks.iter().any(|ack| *ack != STEP_SHUTDOWN) {
+                state = control.cv.wait(state).unwrap_or_else(|poison| poison.into_inner());
+            }
             break;
         }
-        let job = control.job.load(Ordering::Acquire);
-        if job == seen_job {
-            pause();
-            continue;
-        }
+        let job = state.job;
+        drop(state);
         if run_sensor_job(page, control).is_err() {
-            control.shutdown.store(true, Ordering::Release);
-            control.token.value.store(STEP_SHUTDOWN, Ordering::Release);
+            let mut state = lock_turn(control);
+            state.shutdown = true;
+            state.token = STEP_SHUTDOWN;
+            control.cv.notify_all();
             break;
         }
-        control.finished.store(job, Ordering::Release);
+        let mut state = lock_turn(control);
+        state.finished = job;
+        control.cv.notify_all();
         seen_job = job;
     }
 }
@@ -239,7 +227,13 @@ fn run_sensor_job(page: *mut Page, control: &Control) -> Result<(), String> {
         }
     }
     for step in 0..BURST {
-        let published = control.token.value.fetch_add(1, Ordering::AcqRel) + 1;
+        let published = {
+            let mut state = lock_turn(control);
+            state.token = state.token.wrapping_add(1);
+            let published = state.token;
+            control.cv.notify_all();
+            published
+        };
         if step < pedestal {
             unsafe {
                 for plane in active_planes(mask) {
@@ -249,15 +243,21 @@ fn run_sensor_job(page: *mut Page, control: &Control) -> Result<(), String> {
                 }
             }
         }
-        spin_until(
-            || {
-                control
-                    .acks
-                    .iter()
-                    .all(|ack| ack.value.load(Ordering::Acquire) == published)
-            },
-            "sensor waiting for synapse turn",
-        )?;
+        let mut state = lock_turn(control);
+        let started = Instant::now();
+        while state.acks.iter().any(|ack| *ack != published) && !state.shutdown {
+            let (guard, wait) = control
+                .cv
+                .wait_timeout(state, TURN_TIMEOUT)
+                .unwrap_or_else(|poison| poison.into_inner());
+            state = guard;
+            if wait.timed_out() || started.elapsed() > TURN_TIMEOUT {
+                return Err("sensor waiting for synapse turn timed out after 8000 ms".to_string());
+            }
+        }
+        if state.shutdown && state.acks.iter().any(|ack| *ack != published) {
+            return Err("sensor shut down while waiting for a synapse turn".to_string());
+        }
     }
     unsafe {
         for plane in active_planes(mask) {
@@ -278,21 +278,28 @@ fn run_sensor_job(page: *mut Page, control: &Control) -> Result<(), String> {
 }
 
 fn synapse_worker(page: usize, control: usize, role: usize) {
-    pin(SYNAPSE_CPUS[role]);
+    demote_worker();
     let page = page as *mut Page;
     let control = unsafe { &*(control as *const Control) };
-    control.ready.fetch_add(1, Ordering::Release);
+    {
+        let mut state = lock_turn(control);
+        state.ready += 1;
+        control.cv.notify_all();
+    }
     let mut seen = 0u32;
     loop {
-        let token = control.token.value.load(Ordering::Acquire);
-        if token == seen {
-            pause();
-            continue;
-        }
-        if token == STEP_SHUTDOWN {
-            control.acks[role].value.store(STEP_SHUTDOWN, Ordering::Release);
-            break;
-        }
+        let token = {
+            let mut state = lock_turn(control);
+            while state.token == seen && !state.shutdown {
+                state = control.cv.wait(state).unwrap_or_else(|poison| poison.into_inner());
+            }
+            if state.shutdown || state.token == STEP_SHUTDOWN {
+                state.acks[role] = STEP_SHUTDOWN;
+                control.cv.notify_all();
+                break;
+            }
+            state.token
+        };
         let mask = control.mask.load(Ordering::Acquire);
         unsafe {
             for plane in active_planes(mask) {
@@ -306,7 +313,9 @@ fn synapse_worker(page: usize, control: usize, role: usize) {
             }
         }
         seen = token;
-        control.acks[role].value.store(token, Ordering::Release);
+        let mut state = lock_turn(control);
+        state.acks[role] = token;
+        control.cv.notify_all();
     }
 }
 
@@ -343,18 +352,17 @@ impl Alu {
             }
         }
         let control = Box::into_raw(Box::new(Control {
-            shutdown: AtomicBool::new(false),
-            ready: AtomicU32::new(0),
-            job: AtomicU32::new(0),
-            finished: AtomicU32::new(0),
+            turn: Mutex::new(TurnState {
+                shutdown: false,
+                ready: 0,
+                job: 0,
+                finished: 0,
+                token: 0,
+                acks: [0, 0, 0],
+            }),
+            cv: Condvar::new(),
             mask: AtomicU32::new(0),
             pedestal: AtomicU32::new(PEDESTAL),
-            token: PaddedU32 {
-                value: AtomicU32::new(0),
-            },
-            acks: [0, 1, 2].map(|_| PaddedU32 {
-                value: AtomicU32::new(0),
-            }),
             drives: std::array::from_fn(|_| std::array::from_fn(|_| AtomicI8::new(0))),
             t_pos: std::array::from_fn(|_| AtomicU32::new(0)),
             t_neg: std::array::from_fn(|_| AtomicU32::new(0)),
@@ -392,11 +400,19 @@ impl Alu {
             _guard: guard,
         };
         let ready = unsafe { &*alu.control };
-        if let Err(error) = spin_until(
-            || ready.ready.load(Ordering::Acquire) == 4,
-            "workers did not pin",
-        ) {
-            panic!("{error}");
+        {
+            let mut state = lock_turn(ready);
+            let started = Instant::now();
+            while state.ready < 4 {
+                let (guard, wait) = ready
+                    .cv
+                    .wait_timeout(state, TURN_TIMEOUT)
+                    .unwrap_or_else(|poison| poison.into_inner());
+                state = guard;
+                if wait.timed_out() || started.elapsed() > TURN_TIMEOUT {
+                    panic!("workers did not start within 8000 ms");
+                }
+            }
         }
         alu
     }
@@ -535,20 +551,31 @@ impl Alu {
         if self.next_job == 0 {
             self.next_job = 1;
         }
-        control.job.store(job, Ordering::Release);
-        if let Err(error) = spin_until(
-            || control.finished.load(Ordering::Acquire) == job || control.shutdown.load(Ordering::Acquire),
-            "contention job",
-        ) {
-            self.fault = Some(error.clone());
-            return Err(error);
-        }
-        if control.shutdown.load(Ordering::Acquire) && control.finished.load(Ordering::Acquire) != job {
-            let error = "contention worker shut down before the job finished".to_string();
-            self.fault = Some(error.clone());
-            return Err(error);
+        {
+            let mut state = lock_turn(control);
+            state.job = job;
+            control.cv.notify_all();
+            let started = Instant::now();
+            while state.finished != job && !state.shutdown {
+                let (guard, wait) = control
+                    .cv
+                    .wait_timeout(state, TURN_TIMEOUT)
+                    .unwrap_or_else(|poison| poison.into_inner());
+                state = guard;
+                if wait.timed_out() || started.elapsed() > TURN_TIMEOUT {
+                    let error = "contention job timed out after 8000 ms".to_string();
+                    self.fault = Some(error.clone());
+                    return Err(error);
+                }
+            }
+            if state.shutdown && state.finished != job {
+                let error = "contention worker shut down before the job finished".to_string();
+                self.fault = Some(error.clone());
+                return Err(error);
+            }
         }
         self.jobs += 1;
+        crate::ThermalGovernor::after_contention(1);
         let mut waves = [decode_counts(0, 0); CHANNELS];
         for plane in active_planes(u32::from(mask)) {
             let t_pos = control.t_pos[plane].load(Ordering::Acquire);
@@ -567,7 +594,12 @@ impl Alu {
 impl Drop for Alu {
     fn drop(&mut self) {
         let control = unsafe { &*self.control };
-        control.shutdown.store(true, Ordering::Release);
+        {
+            let mut state = lock_turn(control);
+            state.shutdown = true;
+            state.token = STEP_SHUTDOWN;
+            control.cv.notify_all();
+        }
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }

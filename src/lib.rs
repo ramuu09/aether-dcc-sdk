@@ -3,6 +3,7 @@
 //! GhostVault, and the 64-node Ising paradox solver.
 
 mod abi;
+mod estimator_ablation;
 mod bitnet;
 mod cpu_alu;
 mod gpu;
@@ -16,12 +17,39 @@ mod sentinel;
 pub use bitnet::{argmax, corrupt, glyph_f32, ratio, reference, weight_census, GLYPHS};
 pub use cpu_alu::Alu;
 pub use gpu::{BitnetSample, GpuEngine, GPU_ADD, GPU_XOR};
+pub use estimator_ablation::{ablation_benchmark, AblationReport};
 pub use product::{digit_qa, product_benchmark, DigitQa};
 pub use report::{print_scorecard, ScenarioReport};
 pub use scenarios::{
     run_all, stress_adversarial_alu_fuzzer, stress_concurrent_cpu_gpu_collision, stress_endurance_marathon,
     stress_hostile_os_storm, stress_pathological_paradox_and_graphs, stress_vision_noise_cliff_and_zero_fix,
 };
+
+/// Parks the machine between batches. Burst and pedestal stay at the exact
+/// quaternary counts. Batch runners call the breathers so the fan and the
+/// desktop get a 1 ms idle gap.
+pub const COOL_DIGIT_TRIALS: usize = 1;
+
+pub struct ThermalGovernor;
+
+impl ThermalGovernor {
+    pub const BURST: u32 = 4;
+    pub const PEDESTAL: u32 = 4;
+    const EVERY: u32 = 32;
+
+    pub fn after_contention(count: u32) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static OPS: AtomicU32 = AtomicU32::new(0);
+        let total = OPS.fetch_add(count, Ordering::Relaxed).wrapping_add(count);
+        if total / Self::EVERY != (total - count) / Self::EVERY {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    pub fn after_dispatch() {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -77,5 +105,31 @@ mod tests {
         assert_eq!(qa.clean, 10, "clean digits");
         assert_eq!(qa.band_misses, 0, "noise band 0..=12 flips");
         assert_eq!(qa.mismatches, 0, "GPU diverged from the host reference");
+    }
+
+    #[test]
+    fn test_pillar6_preemption_ablation_naive_vs_hardened() {
+        let started = std::time::Instant::now();
+        let report = super::ablation_benchmark().expect("ablation harness");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed.as_millis() < 50,
+            "ablation took {} ms",
+            elapsed.as_millis()
+        );
+        assert_eq!(report.turn.errors, 0, "turn pedestal errors {}", report.turn.errors);
+        assert!(
+            report.chopper.ser < 0.001,
+            "chopper SER {:.6}% ({}/{})",
+            report.chopper.ser * 100.0,
+            report.chopper.errors,
+            report.chopper.trials
+        );
+        assert!(
+            report.naive.errors > report.chopper.errors,
+            "naive {} did not exceed chopper {}",
+            report.naive.errors,
+            report.chopper.errors
+        );
     }
 }

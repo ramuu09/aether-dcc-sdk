@@ -1,6 +1,6 @@
 # Differential Contention Compute on Commodity x86 and Intel UHD Silicon
 
-**AetherDCC Studio v1.0.** Empirical record from `cargo run --release -- --product-benchmark` on an Intel i5-10210U whose DXGI adapter enumerates as `Intel(R) UHD Graphics`, vendor `0x8086`, device `0x9B41`, feature level 11.1. Date of the run: 2026-10-18.
+**AetherDCC Studio v1.0.** Empirical record from `cargo run --release -- --product-benchmark` on an Intel i5-10210U whose DXGI adapter enumerates as `Intel(R) UHD Graphics`, vendor `0x8086`, device `0x9B41`, feature level 11.1. Date of the runs: 2026-10-18. Section 4 and Section 6.0 are the cool process this command prints now: workers parked between jobs, no burn threads, and a deterministic stall in the ablation. Section 6.1 through Section 6.8, and Section 4.5, are the retired long hostile campaign from the same date. Those tables are kept. They are not the cells the current command prints.
 
 ## Abstract
 
@@ -10,9 +10,9 @@ A binary gate records one threshold crossing. Under a full CPU load that crossin
 Y = \frac{t_{\mathrm{pos}} - t_{\mathrm{neg}}}{t_{\mathrm{pos}} + t_{\mathrm{neg}}}.
 \]
 
-A scale factor shared by both banks cancels. With a pedestal of 4 and a burst of 4, three synapses land on four plateaus, \(Y \in \{-0.600,\ -0.200,\ +0.200,\ +0.600\}\), which the ALU reads as the signed magnitudes \(\{-3,\ -1,\ +1,\ +3\}\). The same ratio, with the pedestal removed, is the full-scale logic value \(\pm 1\) and the paradox value \(0\).
+A scale factor shared by both banks cancels. A stall added to only one bank stays in the ratio and drives that trial toward \(\pm 1\). Section 4 measures the stall. With a pedestal of 4 and a burst of 4, three synapses land on four plateaus, \(Y \in \{-0.600,\ -0.200,\ +0.200,\ +0.600\}\), which the ALU reads as the signed magnitudes \(\{-3,\ -1,\ +1,\ +3\}\). The same ratio, with the pedestal removed, is the full-scale logic value \(\pm 1\) and the paradox value \(0\).
 
-This paper records that construction on the i5-10210U and its integrated GPU, device `0x9B41`. A single `cs_5_0` dispatch evaluates a 64→16→10 ternary network whose zero weights never issue `InterlockedAdd`. An empty canvas scores +0.000 on every digit class. GhostVault runs a 128-bit XOR-then-ADD cipher in the same compute shader. Odd liar rings that have no Boolean fixed point settle at \(Y = +0.000\) in one ALU pass. A 64-node Ising relaxation on the same GPU meets or beats a binary greedy cut on energy. Across the six stress scenarios below, the release run recorded 0 bit errors, including 1,014,247 compared fuzzer bits at 0.000000% BER, while eight unpinned hostile threads held the CPU at 100.0% busy.
+This paper records that construction on the i5-10210U and its integrated GPU, device `0x9B41`. A single `cs_5_0` dispatch evaluates a 64→16→10 ternary network whose zero weights never issue `InterlockedAdd`. An empty canvas scores +0.000 on every digit class. GhostVault runs a 128-bit XOR-then-ADD cipher in the same compute shader. Odd liar rings that have no Boolean fixed point settle at \(Y = +0.000\) in one ALU pass. A 64-node Ising relaxation on the same GPU meets or beats a binary greedy cut on energy. The cool product run in Section 6.0 kept bit errors at 0. The retired campaign in Section 6 compared 1,014,247 fuzzer bits at 0.000000% BER while eight unpinned hostile threads held the CPU at 100.0% busy. That campaign is no longer what the command runs.
 
 ## 1. Introduction: the binary wall and bus-contention physics
 
@@ -50,7 +50,7 @@ Y_{\mathrm{meas}}
   = Y,
 \]
 
-provided \(\alpha \neq 0\) and the denominator is nonzero. The factor sits in the numerator and the denominator and divides out. A drift that hits only one bank does not cancel. The hardware section is the construction that keeps the two banks on the same page, the same burst, and the same turn, so the drift they see is common.
+provided \(\alpha \neq 0\) and the denominator is nonzero. The factor sits in the numerator and the denominator and divides out. A drift that hits only one bank does not cancel. The hardware section is the construction that keeps the two banks on the same page, the same burst, and the same turn, so the drift they see is common. Section 4 puts a scheduler stall on one rail and records three estimators of the same symbol.
 
 ### 2.3 Quaternary plateaus
 
@@ -113,13 +113,87 @@ The release storm executed three host programs on the quaternary ALU and checked
 - Hybrid fold of the blocks `SENSOR-BLOCK-630`, `DCC-UHD-MASK-16b`, and `BIAS-LANE-QUATER`, threshold 1800. The accumulator was 136, the decision was 2, the stamp was 141, and the inverted stamp was 65394.
 - Cipher round-trip on the ALU side contributed 0 extra bit errors.
 
-## 4. Beyond binary
+## 4. Common-Mode vs. Differential-Mode Noise: The One-Sided Preemption Failure & Ablation Study
 
-### 4.1 Why the liar ring stops at zero
+Section 2.2 divides out a scale \(\alpha(T, f)\) that multiplies both rails inside one measurement window. Thermal throttling, a Turbo Boost step, and a shared bus stretch are that kind of disturbance when they hit \(t_{\mathrm{pos}}\) and \(t_{\mathrm{neg}}\) together. A Windows NT preemption is a different disturbance. The scheduler suspends the sensor in the middle of one rail of one group. The sleep is added to that rail alone. Call it differential-mode impulse noise.
+
+The command now runs 500 trials, 100 of each symbol \(-3, -1, 0, +1, +3\). It spawns no burn threads and pins nobody. Each trial is eight groups. A clean group is the symbol's ideal weights times 1,000. The weights are \((4,1)\), \((3,2)\), \((1,1)\), \((2,3)\), and \((1,4)\) for \(+3, +1, 0, -1, -3\). One synthetic stall of 5,000,000 ticks is added to the negative rail of group 0 on every trial. That stall is the injected \(\Delta_{\mathrm{sched}}\). Decision edges are fixed: \(Y > 0.4\) reads \(+3\), \(Y > 0.1\) reads \(+1\), \(Y \ge -0.1\) reads \(0\), \(Y \ge -0.4\) reads \(-1\), and any lower \(Y\) reads \(-3\). A rejected symbol counts as three bit errors. Symbol error rate is the decision metric. The whole ablation in the timed product process below took 0.823 ms.
+
+### 4.1 A one-sided stall sends the cumulative sum to the rail
+
+Let \(P = \sum_k t_{\mathrm{pos}}^{(k)}\) and \(N = \sum_k t_{\mathrm{neg}}^{(k)}\) be the sums of the unstalled group times, and let a scheduler delay \(\Delta_{\mathrm{sched}}\) land only on the negative rail of group \(k^*\). The naive estimator adds every first-attempt group, including that delay:
+
+\[
+Y_{\mathrm{naive}}
+  = \frac{P - (N + \Delta_{\mathrm{sched}})}{P + N + \Delta_{\mathrm{sched}}}
+  = \frac{(P - N)/\Delta_{\mathrm{sched}} - 1}{(P + N)/\Delta_{\mathrm{sched}} + 1}.
+\]
+
+As \(\Delta_{\mathrm{sched}} \to \infty\) the quotients vanish and \(Y_{\mathrm{naive}} \to -1\). The same delay on the positive rail sends \(Y_{\mathrm{naive}} \to +1\). Either limit sits past every quaternary threshold, so one stalled group moves the symbol.
+
+The unit test `neg_stall_drives_the_sum_to_minus_one_and_the_gate_drops_it` plants 5,000,000 ticks on the last of eight otherwise-clean groups. The stall is on the negative rail for \(+3\), \(+1\), \(0\), and \(-1\), and on the positive rail for \(-3\): a further negative stall on a symbol that is already \(-3\) drives \(Y\) toward \(-1\) and stays on that symbol. All five planted stalls decode to the wrong symbol, and each naive \(Y\) has absolute value above 0.9. The limit case \(\Delta = 2^{62}\) on the negative rail of a \(+1\) pattern yields \(Y < -0.999\).
+
+On this injection the stall hits the negative rail of every symbol, including \(-3\). A symbol that is already \(-3\) moves toward \(-1\) and still decodes as \(-3\). The other four symbols also move toward \(-1\) and decode as \(-3\), so they are wrong. That is 400 / 500 symbol errors. Because every trial is stalled, the median \(Y\) of those four symbols leaves the plateau. The \(-3\) median leaves \(-0.600\) as well and remains a correct decode.
+
+A minority of live preemptions can leave the median on the plateau while the wrecked trials are wrong. An earlier sum of every micro-slice duration, in the separate `dcc-time-rail` harness (slice 80,000, 8 groups, hostile CPU 100.0%, median energy scale \(2.755\times\)), recorded 4,266 / 10,000 symbol errors (42.660% SER, 24.266667% BER) and still printed per-symbol median \(Y\) at \(-0.608,\ -0.201,\ -0.001,\ +0.205,\ +0.603\). The zero class in that run was wrong on 1,481 / 2,000 trials (74.050%) with a p10/p90 spread of \(-0.537\) to \(+0.525\). The middle sample stayed at \(-0.001\).
+
+That 42.660% figure belongs to that earlier sum. It is not the naive cell of the cool table below, and the harness does not print it as a constant.
+
+### 4.2 Remedy A — denominator gate and a per-group chopper median
+
+Group \(k\) reports an energy \(E^{(k)} = t_{\mathrm{pos}}^{(k)} + t_{\mathrm{neg}}^{(k)}\). The baseline is the clean group energy of that symbol. A group whose energy exceeds \(\tau_{\mathrm{preempt}} = 3.5 \times E_{\mathrm{baseline}}\) is dropped. There is no resample. Each kept group is reduced to a ratio before the groups are combined:
+
+\[
+y^{(k)} = \frac{t_{\mathrm{pos}}^{(k)} - t_{\mathrm{neg}}^{(k)}}{t_{\mathrm{pos}}^{(k)} + t_{\mathrm{neg}}^{(k)}},
+\qquad
+Y_{\mathrm{chopper}} = \operatorname{median}_k y^{(k)}.
+\]
+
+A stall large enough to cross a threshold also inflates the denominator, so the gate removes group 0 from the median. The other seven groups are the clean weights. The naive row still adds every group, so the same stall remains visible there. A symbol whose eight groups all fail the gate would count as three bit errors. In the cool run, one group was dropped and seven were kept.
+
+### 4.3 Remedy B — work-conserving atomic turns
+
+The third estimator is the ALU of Section 3: pedestal 4, burst 4, `lock xadd` on the two banks. The counter advances when a cache line changes owners. A scheduler pause stops the thread and stops the counter with it. Sleep time is absent from both rails. The five symbols are the drives \(\{+1,+1,+1\}\), \(\{+1,+1,-1\}\), \(\{0,0,0\}\), \(\{-1,-1,+1\}\), and \(\{-1,-1,-1\}\), decoded with the same \(Y\) edges. The cool harness probes the ALU once per symbol, five probes in all, and repeats that \(Y\) across the 100 trials of the symbol. The synthetic stall is not an atomic transfer, so it is absent from this row. The workers sit at below-normal priority, unpinned, and wait on a condition variable between probes.
+
+### 4.4 Cool ablation, 500 symbols, deterministic stall
+
+Primary window: the warm `cargo run --release -- --product-benchmark` process on 2026-10-18. Wall clock of that command was 0.88 s. Cargo reported `Finished` in 0.01 s. The process printed `product pillars bitnet PASS stress PASS ablation PASS`. The ablation log line was `elapsed 0.823 ms` and `CPU burn threads 0`, and the busy field printed `0.0%`. The same binary's release test `test_pillar6_preemption_ablation_naive_vs_hardened` printed the same three error rates, with elapsed 0.996 ms. The suite around that test finished 9 passed, 0 failed, in 0.60 s. The ablation pillar passes when the turn estimator has 0 symbol errors, the chopper symbol-error rate is under 0.1%, and the naive error count is larger than the chopper error count. There is no CPU-busy gate.
+
+| Estimator architecture | Median \(Y\) (\(-3, -1, 0, +1, +3\)) | Vulnerable to one-sided preemption? | Symbol error rate (500 trials, injected stall) |
+| :--- | :---: | :---: | :---: |
+| **1. Naive cumulative rail-sum** | \(-0.997,\ -0.994,\ -0.997,\ -0.990,\ -0.987\) | **YES** (the injected stall enters the rail sum) | **80.000000%** (400 / 500), BER 40.000000% |
+| **2. Chopper + denominator gate** | \(-0.600,\ -0.200,\ +0.000,\ +0.200,\ +0.600\) | **NO** (group 0 dropped, then the per-group median) | **0.000000%** (0 / 500), BER 0.000000% |
+| **3. Work-conserving turn pedestal** | \(-0.600,\ -0.200,\ +0.000,\ +0.200,\ +0.600\) | **IMMUNE** (counts completed atomic transfers) | **0.000000%** (0 / 500), BER 0.000000% |
+
+The naive medians sit near \(-1\) because the stall is present on every trial. Chopper and turn stay on the plateaus.
+
+### 4.5 Retired live windows, 10,000 symbols at 100.0% CPU busy
+
+These two windows are the hostile campaign retired by the thermal patch. `cargo run --release -- --product-benchmark` does not print them. Eight unpinned threads thrashed a 16 MB buffer. The sensor was pinned to logical CPU 2. Each group was a Bresenham interleave of 80,000 dependent mul-add iterations, and the chopper of that binary resampled a rejected group. CPU busy was 100.0% in both windows.
+
+Product-benchmark window of that binary. Quiet group energies, in TSC ticks, before the hostile threads started: \(-3\) 1,680,021; \(-1\) 1,599,954; \(0\) 637,913; \(+1\) 1,601,956; \(+3\) 1,598,228. The process printed `product pillars bitnet PASS stress PASS ablation PASS`.
+
+| Estimator architecture | Median \(Y\) (\(-3, -1, 0, +1, +3\)) | Symbol error rate (10,000 trials at 100% load) |
+| :--- | :---: | :---: |
+| **1. Naive cumulative rail-sum** | \(-0.602,\ -0.201,\ -0.000,\ +0.201,\ +0.602\) | **12.390%** (1,239 / 10,000), BER 8.030000% |
+| **2. Chopper + denominator gate** | \(-0.605,\ -0.205,\ +0.002,\ +0.207,\ +0.606\) | **0.000%** (0 / 10,000), BER 0.000000% |
+| **3. Work-conserving turn pedestal** | \(-0.600,\ -0.200,\ +0.000,\ +0.200,\ +0.600\) | **0.000%** (0 / 10,000), BER 0.000000% |
+
+Release-test window of that same binary, `cargo test --release -- --test-threads=1`. Quiet energies: \(-3\) 1,677,156; \(-1\) 1,697,117; \(0\) 643,987; \(+1\) 1,678,947; \(+3\) 1,682,612. The suite finished 9 passed, 0 failed, in 235.70 s.
+
+| Estimator architecture | Median \(Y\) (\(-3, -1, 0, +1, +3\)) | Symbol error rate |
+| :--- | :---: | :---: |
+| **1. Naive cumulative rail-sum** | \(-0.641,\ -0.207,\ -0.000,\ +0.199,\ +0.600\) | **23.040%** (2,304 / 10,000), BER 12.826667% |
+| **2. Chopper + denominator gate** | \(-0.599,\ -0.198,\ +0.001,\ +0.204,\ +0.603\) | **0.000%** (0 / 10,000), BER 0.000000% |
+| **3. Work-conserving turn pedestal** | \(-0.600,\ -0.200,\ +0.000,\ +0.200,\ +0.600\) | **0.000%** (0 / 10,000), BER 0.000000% |
+
+## 5. Beyond binary
+
+### 5.1 Why the liar ring stops at zero
 
 Boolean iteration on a 3-cycle or a 5-cycle of negations has no fixed point. The release log recorded, for both lengths, `livelock true` and `fixed point exists false` after 100 steps. The DCC pass does not iterate. Node drives \(\{+1,\ -1,\ 0\}\) at pedestal 0 produce counts 4/4. Every node of the 3-ring and every node of the 5-ring printed `Y +0.000`, finite. That is the paraconsistent reading: the ring is admitted as a single undecided value instead of being forced to oscillate. The same run checked a disconnected pedestal node (`counts 4/4`, `Y +0.000`, `NaN false`).
 
-### 4.2 The 1.58-bit network and zero-weight skipping
+### 5.2 The 1.58-bit network and zero-weight skipping
 
 The network is one dispatch. Layer 1 maps 64 pixels to 16 hidden neurons with weights in \(\{-1, 0, +1\}\). Layer 2 maps those 16 centered activations to 10 class scores, again in \(\{-1, 0, +1\}\).
 
@@ -137,7 +211,7 @@ On a clean codeword the true class scores 64 and every rival scores 0. One flipp
 
 The four-class vision path is a separate cliff. Its empty-canvas raw counts on this run were 896/640, 1024/512, 832/704, and 768/768. Dividing those counts without removing the DC pedestal prefers the cross class (`+0.250 +0.500 +0.125 +0.000`). After DC centering the same frame is `+0.000 +0.000 +0.000 +0.000`.
 
-### 4.3 Ising relaxation
+### 5.3 Ising relaxation
 
 Sixty-four spins, couplings in \(\{+1,\ -1\}\), degree at most 8. Energy is
 
@@ -149,11 +223,26 @@ with \(s \in \{-1, 0, +1\}\). It is not the conventional \(-\!J_{ij} s_i s_j\). 
 
 Wave 0 writes the bias as a burst of 4 on one bank. Later waves push from the current spin. A zero spin does not push. Antiferromagnetic coupling sends a positive spin onto the neighbor’s negative bank. If both banks are empty the previous spin is kept. Otherwise the heavier bank sets the spin, and equal nonzero banks reset the spin to 0 (the paradox value). The five graphs planted for the suite are a 56-edge star forest, a 90-edge dense Möbius ladder on 30 rungs, a 96-edge bipartite spin glass, an 8×8 grid with 112 edges, and 12 disjoint 5-cycles (60 edges).
 
-## 5. Empirical results
+## 6. Empirical results
 
-All figures in this section come from one `cargo run --release -- --product-benchmark` on the machine above. The harness prints a failure and exits nonzero. It does not relax an assertion to obtain a pass.
+Section 6.0 is the cool process this command prints. Sections 6.1 through 6.8 are one earlier `cargo run --release -- --product-benchmark` on the same machine, the long hostile campaign of 2026-10-18. That campaign held the CPU at 100.0% busy with eight burn threads. The current binary does not. Latencies in 6.1 through 6.8 are kept as that record. The harness prints a failure and exits nonzero. It does not relax an assertion to obtain a pass.
 
-### 5.1 Product scorecard
+### 6.0 Cool product scorecard
+
+Warm `cargo run --release -- --product-benchmark` on 2026-10-18, wall clock 0.88 s, exit 0. Workers are below normal priority and unpinned. Between jobs they wait. The sentinel pass spawns no burn threads. A class miss is allowed up to one; bit errors are not. This process had one class miss (`Nominal quiet, auth on` read `SPOOFED_TELEMETRY_ANOMALY`) and 0 bit errors, so the hostile row shows 1 error and status PASS. The same afternoon's release test classified 8/8 on that scenario.
+
+| Scenario | Ops/Cycles | Latency p50 / p99 µs | Errors | Status |
+| --- | ---: | ---: | ---: | --- |
+| Cool sentinel pass | 189 | 379.0 / 13,618.4 | 1 | PASS |
+| Endurance, 32 cycles | 32 | 39.9 / 1,663.8 | 0 | PASS |
+| CPU + UHD collision | 8 | 497.6 / 2,247.7 | 0 | PASS |
+| Adversarial fuzzer, 32 ops | 49 | 40.5 / 2,234.0 | 0 | PASS |
+| Vision noise cliff | 10 | 1,025.9 / 1,722.5 | 0 | PASS |
+| Paradox rings and Ising graphs | 221 | 70.3 / 1,752.2 | 0 | PASS |
+
+Six of six passed. Endurance printed the four plateaus, full-scale counts 12/0, 0/12, and 4/4, 0 deadlocks, 0 overflows, and working-set growth 0 bytes. The fuzzer compared 1,367 bits at 0.000000% BER (GPU cipher 0 / 512 bits). Collision reported CPU bit errors 0, GPU cipher 0 / 2,048 bits, and vision 8/8. BitNet matched the host (`mismatches 0`), p50 438.0 µs, p99 1,257.2 µs, with one trial per noise level: 10/10 clean glyphs, 100% through 20 flips, and 0% at 24 and 28 flips. Vision, also one trial per level, was 100% through 24 flips and 0% at 28. The odd-cycle web tied at \(E = -36\) (greedy cut 48, GPU cut 36). C ABI script results were 622, 0, and 136. The star solve returned status 0, energy −56, cut 56, in 1,777.8 µs. A separate `cargo test --release -- --test-threads=1` finished 9 passed, 0 failed, in 0.60 s (command wall clock 0.79 s) once the Ising bytecode cache under `shader-cache/` was warm. The process that wrote that cache finished in 40.55 s. With the studio window open and idle, the process accumulated 0.000 ms of processor time across an 800 ms sample.
+
+### 6.1 Retired product scorecard
 
 | Scenario | Ops/Cycles | Latency p50 / p99 µs | Errors | Status |
 | --- | ---: | ---: | ---: | --- |
@@ -164,27 +253,27 @@ All figures in this section come from one `cargo run --release -- --product-benc
 | Vision noise cliff | 322 | 941.3 / 1,181.8 | 0 | PASS |
 | Paradox rings and Ising graphs | 221 | 1.1 / 2,063.2 | 0 | PASS |
 
-Six of six passed. A separate `cargo test --release -- --test-threads=1 --nocapture` passed these six plus the BitNet digit test: 7 passed, 0 failed, 47.09 s. Latencies move between processes. The table above is the release-report process.
+Six of six passed on that retired process. A separate `cargo test --release -- --test-threads=1 --nocapture` of that campaign passed these six plus the BitNet digit test: 7 passed, 0 failed, 47.09 s. The table above is that release-report process.
 
-### 5.2 Hostile storm
+### 6.2 Hostile storm
 
 Eight unpinned threads thrashed one shared 16 MB buffer. `GetSystemTimes` over the sample window reported CPU busy 100.0%. The sentinel classified 8 of 8 scripted regimes with 0 misses (authenticated idle, nominal quiet, thermal surge, surge plus light noise, memory pressure, memory pressure plus light noise, spoofed dual spike, spoofed partial authentication). The ALU mix inside the storm ran 9,598 jobs and 0 bit errors. Tax, cipher, and hybrid matched the oracle (622, 0 extra bit errors, accumulator 136). Mixed latency was p50 5.5 µs, p95 20.1 µs, p99 2,028.7 µs, max 10,709.0 µs, over 1,181 samples. The p99 is the tail of a machine already at full load, and the error count stayed 0.
 
-### 5.3 Endurance
+### 6.3 Endurance
 
 Ten thousand cycles, twenty thousand jobs, five buckets of two thousand. Every bucket reported 0 bit flips, a zero-magnitude \(|Y|\) of 0.000, and the four plateaus −0.600, −0.200, +0.200, +0.600. Deadlocks 0. Overflows 0. Working-set growth on this process was 12,288 bytes, which is inside the 32 MB fail ceiling. Latency p50 2.4 µs, p95 3.0 µs, p99 23.3 µs, max 3,966.5 µs, \(n = 10{,}000\).
 
-### 5.4 Ring-bus collision
+### 6.4 Ring-bus collision
 
 One D3D device. The CPU ALU on the main thread and the GPU thread overlapped for 200 iterations with no per-iteration barrier. CPU bit errors 0. GPU cipher bit errors 0 out of 51,200 bits. Vision misses 0 out of 200, and all 8 pattern kinds matched. CPU op latency p50 20.2 µs, p99 36.8 µs. The combined sample latency was p50 206.2 µs, p95 882.3 µs, p99 972.9 µs, max 1,376.0 µs, \(n = 800\).
 
-### 5.5 Fuzzer, 1,014,247 bits
+### 6.5 Fuzzer, 1,014,247 bits
 
 The CPU fuzzer drew 50,000 operations from xorshift64 (seed `0xDCC57E55A11C0001`) plus 13 corners. Progress at 10,000, 25,000, and 50,000 showed 0 bit errors. The GPU then issued 500 cipher dispatches. CPU bit errors 0. GPU bit errors 0 out of 64,000 bits. Compared bits 1,014,247. BER 0.000000%. The accounting is \(50{,}013 \times 19 + 500 \times 16 \times 8\). GPU block latency p50 162.7 µs, p99 354.4 µs. The CPU series was p50 5.1 µs, p95 17.9 µs, p99 22.2 µs, max 2,304.5 µs, \(n = 50{,}013\).
 
 The C ABI smoke measured one cold GhostVault block, including device construction and both the XOR and the ADD dispatch, at 1,720.4 µs, status 0, ciphertext `5D D5 A4 F3 41 56 CE C7 E0 E7 8F D8 DF 9B AB 8D`. The steady-state block time is the fuzzer figure, 162.7 µs p50, not the cold-start figure.
 
-### 5.6 Vision cliff
+### 6.6 Vision cliff
 
 | Flipped pixels | Fraction | Accuracy | Mean confidence | Trials |
 | ---: | ---: | ---: | ---: | ---: |
@@ -199,7 +288,7 @@ The C ABI smoke measured one cold GhostVault block, including device constructio
 
 The guaranteed band is 0 through 12 flips. The first level that missed was 16 flips (25.00%). Latency p50 941.3 µs, p95 1,037.5 µs, p99 1,181.8 µs, max 1,961.7 µs, \(n = 322\).
 
-### 5.7 Digit network
+### 6.7 Digit network
 
 The same noise schedule, seed `0xC0FFEE`, one carried xorshift, digit = trial mod 10, 40 trials per level. GPU scores matched the host on every trial (`mismatches 0`).
 
@@ -216,7 +305,7 @@ The same noise schedule, seed `0xC0FFEE`, one carried xorshift, digit = trial mo
 
 Clean glyphs were 10/10. The asserted band is through 12 flips. On this draw the first miss was at 24 flips (37.50%). Dispatch latency after the device already existed: p50 164.9 µs, p99 411.1 µs. A cold ABI inference of glyph 3, which also creates the device, returned class 3, status 0, in 2,120.3 µs.
 
-### 5.8 Ising
+### 6.8 Ising
 
 | Graph | Edges | Greedy cut / \(E\) | GPU cut / \(E\) | GPU µs |
 | --- | ---: | ---: | ---: | ---: |
@@ -228,10 +317,10 @@ Clean glyphs were 10/10. The asserted band is through 12 flips. On this draw the
 
 GPU energy is at or below the greedy energy on every graph. The odd-cycle web ties at \(E = -36\) with a lower cut because spins that settled at 0 are not cut edges. The C ABI solve of the star forest returned status 0, energy −56, cut 56, in 2,122.6 µs including shader compilation on that call.
 
-## 6. Future outlook
+## 7. Future outlook
 
-The ratio in Section 2 does not require a `lock` prefix. It requires two accumulators that share a scale. A time-domain ASIC can replace the cache-line banks with a pair of delay lines, or a pair of pulse counters, clocked in picoseconds, and still emit \(Y\). The common-mode proof is unchanged: \(\alpha(T, f)\) cancels whenever it multiplies both rails. The quaternary plateaus become four calibrated separations rather than four atomic occupancies. The ternary network’s zero-skip becomes a wire that is simply absent. The paradox zero remains the balanced rail, the state a Boolean latch cannot hold. The laptop results in Section 5 are the software measurement of that ratio on parts that already ship. They are the reason a picosecond differential fabric is a scaling of this ALU, not a different algebra.
+The ratio in Section 2 does not require a `lock` prefix. It requires two accumulators that share a scale. A time-domain ASIC can replace the cache-line banks with a pair of delay lines, or a pair of pulse counters, clocked in picoseconds, and still emit \(Y\). The common-mode proof is unchanged: \(\alpha(T, f)\) cancels whenever it multiplies both rails. The quaternary plateaus become four calibrated separations rather than four atomic occupancies. The ternary network’s zero-skip becomes a wire that is simply absent. The paradox zero remains the balanced rail, the state a Boolean latch cannot hold. A stall that lands on only one rail stays in the ratio and drives that trial toward \(\pm 1\). Section 4 records that failure for a cumulative sum, and the two estimators that keep the symbol. The laptop results in Section 6 are the software measurement of the shared-scale ratio on parts that already ship. They are the reason a picosecond differential fabric is a scaling of this ALU, not a different algebra.
 
 ## References in this tree
 
-The executable argument is the source of `aether-dcc-sdk` together with the scorecard in Section 5. Shader text for the digit net and GhostVault is under `src/shaders/`. Vision and Ising HLSL are built in `src/gpu.rs` when `d3dcompiler_47` compiles them, so the pedestal, the degree, and the named groupshared banks stay consistent with the host constants.
+The executable argument is the source of `aether-dcc-sdk` together with the cool scorecard in Section 6.0 and the ablation in Section 4. Shader text for the digit net and GhostVault is under `src/shaders/`. Vision and Ising HLSL are built in `src/gpu.rs`. The first process compiles them with `d3dcompiler_47` and writes the bytecode under `shader-cache/`. Later processes load those bytes.

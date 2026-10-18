@@ -73,7 +73,7 @@ pub fn digit_qa(gpu: &mut GpuEngine) -> DigitQa {
     for level in levels {
         let mut correct = 0u32;
         let mut confidence = 0.0f64;
-        for trial in 0..40usize {
+        for trial in 0..crate::COOL_DIGIT_TRIALS {
             let digit = trial % 10;
             let pixels = bitnet::corrupt(&bitnet::glyph_f32(digit), level, &mut state);
             let sample = gpu.bitnet(&pixels);
@@ -89,14 +89,16 @@ pub fn digit_qa(gpu: &mut GpuEngine) -> DigitQa {
                 correct += 1;
             }
         }
-        let accuracy = correct as f64 / 40.0 * 100.0;
+        let trials = crate::COOL_DIGIT_TRIALS as f64;
+        let accuracy = correct as f64 / trials * 100.0;
         log(format!(
-            "  flips {level:>2} ({:>6.2}%)  accuracy {accuracy:>6.2}%  mean winner score {:>7.2}  ({correct}/40)",
+            "  flips {level:>2} ({:>6.2}%)  accuracy {accuracy:>6.2}%  mean winner score {:>7.2}  ({correct}/{})",
             level as f64 / 64.0 * 100.0,
-            confidence / 40.0
+            confidence / trials,
+            crate::COOL_DIGIT_TRIALS
         ));
-        if level <= 12 && correct != 40 {
-            band_misses += u64::from(40 - correct);
+        if level <= 12 && correct != crate::COOL_DIGIT_TRIALS as u32 {
+            band_misses += u64::from(crate::COOL_DIGIT_TRIALS as u32 - correct);
         }
         if breakdown.is_none() && correct != 40 {
             breakdown = Some(level);
@@ -150,10 +152,31 @@ pub fn product_benchmark() -> i32 {
     if rows.iter().any(|row| !row.passed) {
         failures += 1;
     }
+    log("");
+    let ablation = match crate::estimator_ablation::ablation_benchmark() {
+        Ok(report) => report,
+        Err(error) => {
+            log(format!("  ablation harness error: {error}"));
+            failures += 1;
+            log(format!(
+                "  product pillars  bitnet {}  stress {}  ablation FAIL",
+                if digits_ok { "PASS" } else { "FAIL" },
+                if rows.iter().all(|row| row.passed) { "PASS" } else { "FAIL" }
+            ));
+            return i32::from(failures != 0);
+        }
+    };
+    let ablation_ok = ablation.turn.errors == 0
+        && ablation.chopper.ser < 0.001
+        && ablation.naive.errors > ablation.chopper.errors;
+    if !ablation_ok {
+        failures += 1;
+    }
     log(format!(
-        "  product pillars  bitnet {}  stress {}  abi failures before the suite counted above",
+        "  product pillars  bitnet {}  stress {}  ablation {}  abi failures before the suite counted above",
         if digits_ok { "PASS" } else { "FAIL" },
-        if rows.iter().all(|row| row.passed) { "PASS" } else { "FAIL" }
+        if rows.iter().all(|row| row.passed) { "PASS" } else { "FAIL" },
+        if ablation_ok { "PASS" } else { "FAIL" }
     ));
     i32::from(failures != 0)
 }

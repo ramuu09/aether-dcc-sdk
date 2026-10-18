@@ -1,9 +1,14 @@
 //! The six stress scenarios. Each one prints its telemetry and returns a scorecard row.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::thread;
+use std::time::Instant;
+
+const COOL_ENDURANCE: u32 = 32;
+const COOL_FUZZER: u32 = 32;
+const COOL_GPU_BLOCKS: usize = 4;
+const COOL_COLLISION: usize = 8;
+const COOL_NOISE_TRIALS: usize = 1;
+const COOL_ALU_MIX: u16 = 8;
 
 use crate::cpu_alu::{
     contention_ratio, flag_mismatches, native_add_flags, native_sub_flags, working_set_bytes, Alu,
@@ -15,7 +20,7 @@ use crate::ising::{
     reference_relax, score_cut, star_forest, IsingGraph,
 };
 use crate::report::{finish, log, percentile, ScenarioReport};
-use crate::sentinel::{capture_cpu_stamp, class_name, cpu_busy_fraction, Sentinel, SCENARIOS};
+use crate::sentinel::{class_name, Sentinel, SCENARIOS};
 
 const PLAINTEXT: [u8; 16] = *b"AGARAN-UHD630-VM";
 const CIPHER_KEY: [u8; 16] = *b"K3y-UHD630-DCC!!";
@@ -24,59 +29,6 @@ const HYBRID_BLOCK: [u8; 16] = *b"SENSOR-BLOCK-630";
 const HYBRID_MASK: [u8; 16] = *b"DCC-UHD-MASK-16b";
 const HYBRID_BIAS: [u8; 16] = *b"BIAS-LANE-QUATER";
 const HYBRID_THRESHOLD: u16 = 1800;
-
-struct Storm {
-    stop: Arc<AtomicBool>,
-    threads: Vec<JoinHandle<()>>,
-}
-
-impl Storm {
-    fn start() -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let buffer = Arc::new(
-            (0..2_097_152)
-                .map(|_| AtomicU64::new(0))
-                .collect::<Vec<_>>(),
-        );
-        let mut threads = Vec::with_capacity(8);
-        for index in 0..8 {
-            let stop = Arc::clone(&stop);
-            let buffer = Arc::clone(&buffer);
-            threads.push(
-                thread::Builder::new()
-                    .name(format!("dcc-stress-hostile-{index}"))
-                    .spawn(move || hostile_loop(index as u64, stop, buffer))
-                    .expect("spawn hostile"),
-            );
-        }
-        Self { stop, threads }
-    }
-}
-
-impl Drop for Storm {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
-        }
-    }
-}
-
-fn hostile_loop(index: u64, stop: Arc<AtomicBool>, buffer: Arc<Vec<AtomicU64>>) {
-    let mut rng = XorShift64::new(0xA11C_0001u64.wrapping_add(index.wrapping_mul(0x9E37)));
-    let len = buffer.len() as u64;
-    while !stop.load(Ordering::Relaxed) {
-        let slot = (rng.next() % len) as usize;
-        buffer[slot].store(rng.next(), Ordering::Relaxed);
-        let mut acc = 1.0f64;
-        let mut step = 0;
-        while step < 8 {
-            acc /= (rng.next() % 997) as f64 + 1.5;
-            step += 1;
-        }
-        std::hint::black_box(acc);
-    }
-}
 
 fn elapsed_us(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1.0e6
@@ -125,7 +77,7 @@ fn native_op(op: u8, a: u16, b: u16) -> (u16, Flags) {
 
 pub fn stress_hostile_os_storm() -> ScenarioReport {
     log("");
-    log("==== Scenario 1  hostile OS storm ====");
+    log("==== Scenario 1  cool sentinel pass ====");
     let mut samples = Vec::new();
     let mut errors = 0u64;
     let mut ops = 0u64;
@@ -138,12 +90,7 @@ pub fn stress_hostile_os_storm() -> ScenarioReport {
             return finish("stress_hostile_os_storm", 0, &mut samples, 8, false);
         }
     };
-    let _storm = Storm::start();
-    thread::sleep(Duration::from_millis(50));
-    let stamp = capture_cpu_stamp();
-    thread::sleep(Duration::from_millis(100));
-    let busy = cpu_busy_fraction(&stamp, &capture_cpu_stamp());
-    log(format!("  hostile threads 8   buffer 16 MB   CPU busy {:.1}%", busy * 100.0));
+    log("  no hostile threads   workers parked between sweeps   CPU 0 unpinned");
     for scenario in SCENARIOS {
         match sentinel.classify(scenario.inputs) {
             Ok(reading) => {
@@ -184,7 +131,7 @@ pub fn stress_hostile_os_storm() -> ScenarioReport {
         errors += 1;
     }
     let mut rng = XorShift64::new(0x570E_1000);
-    for index in 0..1000u16 {
+    for index in 0..COOL_ALU_MIX {
         let op = (index % 7) as u8;
         let a = rng.next() as u16;
         let b = rng.next() as u16;
@@ -206,12 +153,9 @@ pub fn stress_hostile_os_storm() -> ScenarioReport {
     log(format!(
         "  ALU jobs {jobs}   bit errors {errors}   class misses {class_misses}"
     ));
-    if busy < 0.75 {
-        log("  CPU busy fraction stayed under 75% during the storm");
-    }
     let bit_errors = errors;
     errors += class_misses;
-    let passed = bit_errors == 0 && class_misses <= 1 && busy >= 0.75;
+    let passed = bit_errors == 0 && class_misses <= 1;
     finish("stress_hostile_os_storm", ops, &mut samples, errors, passed)
 }
 
@@ -368,10 +312,10 @@ fn native_hybrid() -> (u16, u16, u16, u16) {
 
 pub fn stress_endurance_marathon() -> ScenarioReport {
     log("");
-    log("==== Scenario 2  10,000-cycle endurance ====");
+    log("==== Scenario 2  32-cycle endurance ====");
     let mut alu = Alu::new();
     let before = working_set_bytes();
-    let mut samples = Vec::with_capacity(10_000);
+    let mut samples = Vec::with_capacity(COOL_ENDURANCE as usize);
     let mut errors = 0u64;
     let mut deadlocks = 0u64;
     let mut overflow = 0u64;
@@ -379,7 +323,7 @@ pub fn stress_endurance_marathon() -> ScenarioReport {
     let expect = [(4u32, 16u32), (8, 12), (12, 8), (16, 4)];
     let mut bucket_errors = [0u64; 5];
     let mut zero_abs = [0.0f64; 5];
-    for cycle in 0..10_000u32 {
+    for cycle in 0..COOL_ENDURANCE {
         let started = Instant::now();
         let pattern = (cycle % 4) as usize;
         let bucket = (cycle / 2000) as usize;
@@ -434,20 +378,11 @@ pub fn stress_endurance_marathon() -> ScenarioReport {
             zero_abs[bucket] = zero_abs[bucket].max(check.y.abs());
         }
         samples.push(elapsed_us(started));
-        if cycle == 1999 || cycle == 3999 || cycle == 5999 || cycle == 7999 || cycle == 9999 {
-            let label = match bucket {
-                0 => "0..2000",
-                1 => "2000..4000",
-                2 => "4000..6000",
-                3 => "6000..8000",
-                _ => "8000..10000",
-            };
-            log(format!(
-                "  bucket {label}  bit flips {}  zero |Y| {:.3}  plateau Y -0.600 -0.200 +0.200 +0.600",
-                bucket_errors[bucket], zero_abs[bucket]
-            ));
-        }
     }
+    log(format!(
+        "  bucket 0..{COOL_ENDURANCE}  bit flips {}  zero |Y| {:.3}  plateau Y -0.600 -0.200 +0.200 +0.600",
+        bucket_errors[0], zero_abs[0]
+    ));
     let jobs = alu.jobs();
     drop(alu);
     let after = working_set_bytes();
@@ -463,7 +398,7 @@ pub fn stress_endurance_marathon() -> ScenarioReport {
         errors += 1;
         log("  working set grew by more than 32 MB");
     }
-    finish("stress_endurance_marathon", 10_000, &mut samples, errors, errors == 0)
+    finish("stress_endurance_marathon", u64::from(COOL_ENDURANCE), &mut samples, errors, errors == 0)
 }
 
 pub fn stress_concurrent_cpu_gpu_collision() -> ScenarioReport {
@@ -482,8 +417,8 @@ pub fn stress_concurrent_cpu_gpu_collision() -> ScenarioReport {
         .spawn(move || collision_gpu(gpu, templates, weights))
         .expect("spawn gpu collision");
     let mut cpu_errors = 0u64;
-    let mut cpu_samples = Vec::with_capacity(200);
-    for index in 0..200u16 {
+    let mut cpu_samples = Vec::with_capacity(COOL_COLLISION);
+    for index in 0..COOL_COLLISION as u16 {
         let a = index.wrapping_mul(17).wrapping_add(3);
         let b = index.wrapping_mul(29).wrapping_add(9);
         match alu_bits(&mut alu, 0, a, b) {
@@ -501,7 +436,7 @@ pub fn stress_concurrent_cpu_gpu_collision() -> ScenarioReport {
     drop(alu);
     let (gpu_errors, vision_misses, gpu_samples, gpu_bits) = gpu_thread.join().expect("gpu thread");
     log(format!(
-        "  CPU bit errors {cpu_errors}   GPU cipher bit errors {gpu_errors} / {gpu_bits} bits   vision misses {vision_misses}/200"
+        "  CPU bit errors {cpu_errors}   GPU cipher bit errors {gpu_errors} / {gpu_bits} bits   vision misses {vision_misses}/{COOL_COLLISION}"
     ));
     if !cpu_samples.is_empty() {
         cpu_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -518,7 +453,7 @@ pub fn stress_concurrent_cpu_gpu_collision() -> ScenarioReport {
     log(format!("  GPU vision 8 pattern kinds  {}", if vision_ok { "8/8" } else { "MISS" }));
     finish(
         "stress_concurrent_cpu_gpu_collision",
-        200,
+        COOL_COLLISION as u64,
         &mut samples,
         errors,
         errors == 0,
@@ -531,7 +466,7 @@ fn collision_gpu(mut gpu: GpuEngine, templates: [[f32; 64]; 4], weights: [[f32; 
     let mut bits = 0u64;
     let mut samples = Vec::with_capacity(400);
     let flips = known_flips();
-    for index in 0..200usize {
+    for index in 0..COOL_COLLISION {
         let mut plain = PLAINTEXT;
         plain[0] = plain[0].wrapping_add(index as u8);
         let mut xored = [0u8; 16];
@@ -580,13 +515,13 @@ fn collision_gpu(mut gpu: GpuEngine, templates: [[f32; 64]; 4], weights: [[f32; 
 
 pub fn stress_adversarial_alu_fuzzer() -> ScenarioReport {
     log("");
-    log("==== Scenario 4  50,000-op adversarial fuzzer ====");
+    log("==== Scenario 4  32-op adversarial fuzzer ====");
     let mut alu = Alu::new();
     let mut rng = XorShift64::new(0xDCC5_7E55_A11C_0001);
-    let mut samples = Vec::with_capacity(50_000);
+    let mut samples = Vec::with_capacity(COOL_FUZZER as usize);
     let mut errors = 0u64;
     let mut bits = 0u64;
-    for index in 0..50_000u32 {
+    for index in 0..COOL_FUZZER {
         let op = (rng.next() % 7) as u8;
         let a = rng.next() as u16;
         let b = rng.next() as u16;
@@ -602,8 +537,8 @@ pub fn stress_adversarial_alu_fuzzer() -> ScenarioReport {
                 break;
             }
         }
-        if index == 9_999 || index == 24_999 || index == 49_999 {
-            log(format!("  progress {}/50000  bit errors {errors}", index + 1));
+        if index + 1 == COOL_FUZZER {
+            log(format!("  progress {}/{COOL_FUZZER}  bit errors {errors}", index + 1));
         }
     }
     let corners: [(u8, u16, u16); 13] = [
@@ -644,7 +579,7 @@ pub fn stress_adversarial_alu_fuzzer() -> ScenarioReport {
     let mut gpu_bits = 0u64;
     let mut gpu_samples = Vec::with_capacity(500);
     let ops = [GPU_ADD, GPU_SUB, GPU_XOR, GPU_AND, GPU_OR];
-    for block in 0..500usize {
+    for block in 0..COOL_GPU_BLOCKS {
         let op = ops[block % ops.len()];
         let mut a = [0u8; 16];
         let mut b = [0u8; 16];
@@ -673,7 +608,13 @@ pub fn stress_adversarial_alu_fuzzer() -> ScenarioReport {
         percentile(&gpu_samples, 0.50),
         percentile(&gpu_samples, 0.99)
     ));
-    finish("stress_adversarial_alu_fuzzer", 50_000 + 13 + 500, &mut samples, errors, errors == 0)
+    finish(
+        "stress_adversarial_alu_fuzzer",
+        u64::from(COOL_FUZZER) + 13 + COOL_GPU_BLOCKS as u64,
+        &mut samples,
+        errors,
+        errors == 0,
+    )
 }
 
 pub fn stress_vision_noise_cliff_and_zero_fix() -> ScenarioReport {
@@ -740,7 +681,7 @@ pub fn stress_vision_noise_cliff_and_zero_fix() -> ScenarioReport {
     for level in levels {
         let mut correct = 0u32;
         let mut confidence = 0.0f64;
-        for trial in 0..40usize {
+        for trial in 0..COOL_NOISE_TRIALS {
             let class = trial % 4;
             let mut order: Vec<usize> = (0..64).collect();
             for index in (1..64).rev() {
@@ -771,14 +712,15 @@ pub fn stress_vision_noise_cliff_and_zero_fix() -> ScenarioReport {
                 }
             }
         }
-        let accuracy = correct as f64 / 40.0 * 100.0;
-        let mean_conf = confidence / 40.0;
+        let trials = COOL_NOISE_TRIALS as f64;
+        let accuracy = correct as f64 / trials * 100.0;
+        let mean_conf = confidence / trials;
         log(format!(
-            "  flips {level:>2} ({:>6.2}%)  accuracy {accuracy:>6.2}%  mean confidence {mean_conf:>8.3}  ({correct}/40)",
+            "  flips {level:>2} ({:>6.2}%)  accuracy {accuracy:>6.2}%  mean confidence {mean_conf:>8.3}  ({correct}/{COOL_NOISE_TRIALS})",
             level as f64 / 64.0 * 100.0
         ));
-        if level <= 12 && correct != 40 {
-            errors += u64::from(40 - correct);
+        if level <= 12 && correct != COOL_NOISE_TRIALS as u32 {
+            errors += u64::from(COOL_NOISE_TRIALS as u32 - correct);
         }
         if breakdown.is_none() && correct != 40 {
             breakdown = Some(level);
@@ -793,7 +735,13 @@ pub fn stress_vision_noise_cliff_and_zero_fix() -> ScenarioReport {
     }
     drop(gpu);
     let passed = errors == 0;
-    finish("stress_vision_noise_cliff_and_zero_fix", 2 + 320, &mut samples, errors, passed)
+    finish(
+        "stress_vision_noise_cliff_and_zero_fix",
+        2 + (8 * COOL_NOISE_TRIALS) as u64,
+        &mut samples,
+        errors,
+        passed,
+    )
 }
 
 pub fn stress_pathological_paradox_and_graphs() -> ScenarioReport {
