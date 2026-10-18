@@ -1,0 +1,17 @@
+[package]
+name = "aether-dcc-sdk"
+version = "1.0.0"
+edition = "2021"
+description = "AetherDCC Studio v1.0 — non-binary contention compute and 1.58-bit ternary AI"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "aether_dcc_sdk"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = false

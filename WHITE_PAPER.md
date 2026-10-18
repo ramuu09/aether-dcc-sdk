@@ -1,0 +1,237 @@
+# Differential Contention Compute on Commodity x86 and Intel UHD Silicon
+
+**AetherDCC Studio v1.0.** Empirical record from `cargo run --release -- --product-benchmark` on an Intel i5-10210U whose DXGI adapter enumerates as `Intel(R) UHD Graphics`, vendor `0x8086`, device `0x9B41`, feature level 11.1. Date of the run: 2026-10-18.
+
+## Abstract
+
+A binary gate records one threshold crossing. Under a full CPU load that crossing moves with temperature, clock, and the other cores on the ring bus, and the program has no second measurement that would cancel the motion. Differential Contention Compute (DCC) does not threshold a single interval. It races two banks of `lock xadd` on one 4096-byte page and keeps only the normalized difference
+
+\[
+Y = \frac{t_{\mathrm{pos}} - t_{\mathrm{neg}}}{t_{\mathrm{pos}} + t_{\mathrm{neg}}}.
+\]
+
+A scale factor shared by both banks cancels. With a pedestal of 4 and a burst of 4, three synapses land on four plateaus, \(Y \in \{-0.600,\ -0.200,\ +0.200,\ +0.600\}\), which the ALU reads as the signed magnitudes \(\{-3,\ -1,\ +1,\ +3\}\). The same ratio, with the pedestal removed, is the full-scale logic value \(\pm 1\) and the paradox value \(0\).
+
+This paper records that construction on the i5-10210U and its integrated GPU, device `0x9B41`. A single `cs_5_0` dispatch evaluates a 64→16→10 ternary network whose zero weights never issue `InterlockedAdd`. An empty canvas scores +0.000 on every digit class. GhostVault runs a 128-bit XOR-then-ADD cipher in the same compute shader. Odd liar rings that have no Boolean fixed point settle at \(Y = +0.000\) in one ALU pass. A 64-node Ising relaxation on the same GPU meets or beats a binary greedy cut on energy. Across the six stress scenarios below, the release run recorded 0 bit errors, including 1,014,247 compared fuzzer bits at 0.000000% BER, while eight unpinned hostile threads held the CPU at 100.0% busy.
+
+## 1. Introduction: the binary wall and bus-contention physics
+
+A synchronous Boolean machine treats time as a clock edge and treats contention as noise to be closed out by timing margins. On a laptop SoC the margin is not a constant. The ring bus, the L2 spatial prefetcher, and the memory controller all stretch a `lock xadd` by an amount that depends on who else is issuing locks. A threshold placed on one bank therefore moves when the machine gets hot or busy. That is the binary wall: one operand, one comparison, and no common mode to reject.
+
+Contention is still a physical observable. Two atomic counters that share a page, a burst length, and a turn barrier see the same stretch. Their difference, divided by their sum, is a dimensionless field. DCC uses that field as the datum of an ALU, of a ternary synapse, and of a paraconsistent isolator. The implementation in this repository is native Rust with raw FFI to `kernel32`, `d3d11`, `dxgi`, and `d3dcompiler_47`. There is no third-party crate.
+
+The digit experiment is a geometric block code on 64 pixels. It is not a claim about handwritten MNIST.
+
+## 2. Mathematical formulation
+
+### 2.1 Common-mode rejection
+
+Let a turn commit integer counts \(t_{\mathrm{pos}}\) and \(t_{\mathrm{neg}}\) into two cache lines. The reported observable is
+
+\[
+Y =
+\begin{cases}
+0 & \text{if } t_{\mathrm{pos}} + t_{\mathrm{neg}} = 0, \\[4pt]
+\dfrac{t_{\mathrm{pos}} - t_{\mathrm{neg}}}{t_{\mathrm{pos}} + t_{\mathrm{neg}}} & \text{otherwise.}
+\end{cases}
+\]
+
+The zero-over-zero case is defined. The implementation returns `0.0` and does not produce a NaN. On the release run the defined ratio printed as `+0.000`, finite.
+
+### 2.2 Cancellation of thermal and frequency drift
+
+Suppose temperature \(T\) and clock frequency \(f\) scale both banks by the same positive factor \(\alpha(T, f)\). The measured counts are \(\alpha t_{\mathrm{pos}}\) and \(\alpha t_{\mathrm{neg}}\). Substitute:
+
+\[
+Y_{\mathrm{meas}}
+  = \frac{\alpha t_{\mathrm{pos}} - \alpha t_{\mathrm{neg}}}{\alpha t_{\mathrm{pos}} + \alpha t_{\mathrm{neg}}}
+  = \frac{\alpha\,(t_{\mathrm{pos}} - t_{\mathrm{neg}})}{\alpha\,(t_{\mathrm{pos}} + t_{\mathrm{neg}})}
+  = \frac{t_{\mathrm{pos}} - t_{\mathrm{neg}}}{t_{\mathrm{pos}} + t_{\mathrm{neg}}}
+  = Y,
+\]
+
+provided \(\alpha \neq 0\) and the denominator is nonzero. The factor sits in the numerator and the denominator and divides out. A drift that hits only one bank does not cancel. The hardware section is the construction that keeps the two banks on the same page, the same burst, and the same turn, so the drift they see is common.
+
+### 2.3 Quaternary plateaus
+
+Three synapses and a pedestal \(P = 4\), each active synapse adding a burst \(B = 4\) to one bank, give
+
+\[
+t_{\mathrm{pos}} = P + n_{+} B, \qquad t_{\mathrm{neg}} = P + (3 - n_{+}) B.
+\]
+
+The sum is fixed:
+
+\[
+t_{\mathrm{pos}} + t_{\mathrm{neg}} = 2P + 3B = 20.
+\]
+
+The signed excess is \((2n_{+} - 3)B\), so the four legal occupancies are
+
+| \(n_{+}\) | counts \(t_{\mathrm{pos}}/t_{\mathrm{neg}}\) | excess | \(Y\) | magnitude |
+| ---: | ---: | ---: | ---: | ---: |
+| 3 | 16/4 | +12 | +0.600 | +3 |
+| 2 | 12/8 | +4 | +0.200 | +1 |
+| 1 | 8/12 | −4 | −0.200 | −1 |
+| 0 | 4/16 | −12 | −0.600 | −3 |
+
+The ALU reads the magnitude off the excess in units of the burst. The sum bit of a full adder is 1 exactly on the magnitudes \(+3\) and \(-1\). The sign bit follows a positive excess. The XOR bit follows an excess whose absolute value exceeds one burst. AND, OR, XOR, and NOT are one contention job per byte. ADD and SUB are bit-serial over 16 bits. ADD starts with carry 0. SUB starts with carry 1 and inverts the subtrahend. The native carry is the unsigned condition \(a \ge b\). Compare uses the flags of SUB: \(A = B\) when the zero flag is set, \(A > B\) when carry is set and the zero flag is clear, \(A < B\) when carry is clear.
+
+With the pedestal removed, three synapses of \(+1\) produce counts 12/0 and \(Y = +1\); three of \(-1\) produce 0/12 and \(Y = -1\); a cancelling pair produces 4/4 and \(Y = 0\). The release endurance log recorded those full-scale counts as `12/0, 0/12, 4/4`.
+
+### 2.4 Paradox value
+
+A circular liar ring \(X_1 = \neg X_2,\ X_2 = \neg X_3,\ X_3 = \neg X_1\) has no Boolean assignment. The Boolean recurrence \(x_i \leftarrow \neg x_{(i+1) \bmod n}\) on an odd cycle is a period-2 orbit. DCC encodes the three drives as \(\{+1,\ -1,\ 0\}\) with the pedestal off. The opposing bursts land 4 on each bank, the idle drive adds nothing, and
+
+\[
+Y = \frac{4 - 4}{4 + 4} = 0.
+\]
+
+That zero is the Kleene and Priest value BOTH / PARADOX / UNDECIDED: the sentence is not forced to a classical bit. A disconnected node, driven by \(\{0, 0, 0\}\) with the pedestal applied to both banks, also measures 4/4 and \(Y = 0\), which keeps an unforced spin from becoming a NaN.
+
+## 3. Hardware realization
+
+### 3.1 Page layout and the L2 spatial prefetcher
+
+The ALU allocates one page with `VirtualAlloc` (`MEM_COMMIT | MEM_RESERVE`, `PAGE_READWRITE`) and frees it with `MEM_RELEASE`. The page is 4096 bytes and holds eight channels of 256 bytes. Inside a channel the positive `AtomicU32` is at offset 0 and the negative `AtomicU32` is at offset 64, so the two banks occupy different 64-byte lines. The next channel begins 256 bytes later, four cache lines away. A spatial prefetcher that pulls the adjacent line of a sequential stream does not see a contiguous run of counters: the live atomics are isolated by the 256-byte stride, and the whole working set stays inside a single committed page. Compile-time asserts lock `size_of::<Channel>() == 256`, `size_of::<Page>() == 4096`, and `offset_of(neg) == 64`.
+
+The sensor thread is pinned to logical CPU 0 with `SetThreadAffinityMask` and `THREAD_PRIORITY_HIGHEST`. The three synapse threads are pinned to CPUs 2, 4, and 6, the physical cores of the i5-10210U rather than the SMT siblings 1, 3, 5, and 7. The sensor publishes a turn token, adds the pedestal to both banks when the pedestal is on, and waits for three acknowledgements. Each synapse then adds its burst with `fetch_add` (`AcqRel`), which is `lock xadd`. The main thread is never pinned to CPU 0. Hostile-load threads are not pinned either. A process-wide CPU lock prevents the ALU and the sentinel from running together. A spin that is not acknowledged within 8 seconds returns an error. Wrong-GPU, shader-compile, and `VirtualAlloc` failures abort.
+
+### 3.2 Turn synchronization on the UHD
+
+The GPU path creates a D3D11 device on the adapter whose name contains “Intel” and either “UHD” or “630”, requiring vendor `0x8086` and device `0x9B41`, feature level 11.1 and then 11.0. One process may hold one device. Shaders are `cs_5_0`.
+
+Shared local memory is the turn barrier. `GroupMemoryBarrierWithGroupSync` publishes every `groupshared` store before the next phase, and `InterlockedAdd` is the atomic that accumulates a bank. Barriers sit outside thread-id and neighbor branches. Loop bounds that enclose a barrier are uniform. The vision and Ising shaders are compiled with `D3DCOMPILE_SKIP_OPTIMIZATION` so the compiler does not turn a flat switch into a nested `if` deep enough to trip the FXC nesting limit. The digit shader is compiled with flags 0, and its zero-weight test guards the atomic directly.
+
+The vision shader uses a 65-thread group and `Dispatch(4, 1, 1)` over an 8×8 field, pedestal 256 and max burst 16. The Ising shader uses `numthreads(64, 1, 1)` and one `Dispatch(1, 1, 1)`, degree 8, 16 waves, push 4. GhostVault uses `numthreads(4, 1, 1)` and `Dispatch(16, 1, 1)`: sixteen lanes, eight bits, pedestal 4, burst 4.
+
+### 3.3 Instructions that close on the ALU
+
+The release storm executed three host programs on the quaternary ALU and checked them against a native integer oracle.
+
+- Tax. Base 420 plus addons 135 is gross 555. Gross is above 500, so the discount is 55, the net is 500, five additions of 16 produce tax 80, and `(net + tax) XOR 42` is 622.
+- Hybrid fold of the blocks `SENSOR-BLOCK-630`, `DCC-UHD-MASK-16b`, and `BIAS-LANE-QUATER`, threshold 1800. The accumulator was 136, the decision was 2, the stamp was 141, and the inverted stamp was 65394.
+- Cipher round-trip on the ALU side contributed 0 extra bit errors.
+
+## 4. Beyond binary
+
+### 4.1 Why the liar ring stops at zero
+
+Boolean iteration on a 3-cycle or a 5-cycle of negations has no fixed point. The release log recorded, for both lengths, `livelock true` and `fixed point exists false` after 100 steps. The DCC pass does not iterate. Node drives \(\{+1,\ -1,\ 0\}\) at pedestal 0 produce counts 4/4. Every node of the 3-ring and every node of the 5-ring printed `Y +0.000`, finite. That is the paraconsistent reading: the ring is admitted as a single undecided value instead of being forced to oscillate. The same run checked a disconnected pedestal node (`counts 4/4`, `Y +0.000`, `NaN false`).
+
+### 4.2 The 1.58-bit network and zero-weight skipping
+
+The network is one dispatch. Layer 1 maps 64 pixels to 16 hidden neurons with weights in \(\{-1, 0, +1\}\). Layer 2 maps those 16 centered activations to 10 class scores, again in \(\{-1, 0, +1\}\).
+
+Layer 1 is a tiled code. Hidden neuron \(t\) carries weight \(+1\) on one 2×2 tile and weight 0 on the other 60 pixels. Of the 1,184 weights in both layers, 960 are zero (81.08%). The shader loads `w1[h * 64 + tid]` and, when `w == 0`, does not call `InterlockedAdd`. That is the bus saving: a structural zero never becomes an atomic on the groupshared banks.
+
+The hidden centered activation is
+
+\[
+h_t = (P_t - N_t) + \sum_i W^{(1)}_{t,i}.
+\]
+
+For a \(+1\)-only tile the weight sum is 4, so \(h_t = 2 \times (\text{ink count in the tile})\). An all-−1 canvas has \(P = 0\), \(N = 4\), and \(h_t = 0\) on every neuron. Every class score, being a sum of weights times those hidden values, is then 0. The argmax of a ten-way tie is class −1, reported as `BLANK / NO_SIGNAL`. The release log printed `empty canvas scores +0 +0 +0 +0 +0 +0 +0 +0 +0 +0`.
+
+On a clean codeword the true class scores 64 and every rival scores 0. One flipped pixel moves any class score by at most 2, so twelve flips (18.75% of the canvas) move a score by at most 24. The margin from 64 down to 0 still leaves a gap of at least 16, which is why the guaranteed band is not a fitted threshold. Classification uses the integer score. The normalized \(Y\) of a clean true class is \(+1\) (positive mass 64, negative mass 0). A rival sits at \(Y = 0\) because its positive and negative mass are equal.
+
+The four-class vision path is a separate cliff. Its empty-canvas raw counts on this run were 896/640, 1024/512, 832/704, and 768/768. Dividing those counts without removing the DC pedestal prefers the cross class (`+0.250 +0.500 +0.125 +0.000`). After DC centering the same frame is `+0.000 +0.000 +0.000 +0.000`.
+
+### 4.3 Ising relaxation
+
+Sixty-four spins, couplings in \(\{+1,\ -1\}\), degree at most 8. Energy is
+
+\[
+E = \sum_{\{i,j\} \in \text{edges}} s_i s_j,
+\]
+
+with \(s \in \{-1, 0, +1\}\). It is not the conventional \(-\!J_{ij} s_i s_j\). A zero spin contributes nothing, so two configurations can share an energy and differ in cut size. The acceptance rule is GPU energy at or below the binary greedy energy, together with an exact match against the host reference relaxation.
+
+Wave 0 writes the bias as a burst of 4 on one bank. Later waves push from the current spin. A zero spin does not push. Antiferromagnetic coupling sends a positive spin onto the neighbor’s negative bank. If both banks are empty the previous spin is kept. Otherwise the heavier bank sets the spin, and equal nonzero banks reset the spin to 0 (the paradox value). The five graphs planted for the suite are a 56-edge star forest, a 90-edge dense Möbius ladder on 30 rungs, a 96-edge bipartite spin glass, an 8×8 grid with 112 edges, and 12 disjoint 5-cycles (60 edges).
+
+## 5. Empirical results
+
+All figures in this section come from one `cargo run --release -- --product-benchmark` on the machine above. The harness prints a failure and exits nonzero. It does not relax an assertion to obtain a pass.
+
+### 5.1 Product scorecard
+
+| Scenario | Ops/Cycles | Latency p50 / p99 µs | Errors | Status |
+| --- | ---: | ---: | ---: | --- |
+| Hostile OS storm | 1,181 | 5.5 / 2,028.7 | 0 | PASS |
+| Endurance, 10,000 cycles | 10,000 | 2.4 / 23.3 | 0 | PASS |
+| CPU + UHD ring-bus collision | 200 | 206.2 / 972.9 | 0 | PASS |
+| Adversarial fuzzer | 50,513 | 5.1 / 22.2 | 0 | PASS |
+| Vision noise cliff | 322 | 941.3 / 1,181.8 | 0 | PASS |
+| Paradox rings and Ising graphs | 221 | 1.1 / 2,063.2 | 0 | PASS |
+
+Six of six passed. A separate `cargo test --release -- --test-threads=1 --nocapture` passed these six plus the BitNet digit test: 7 passed, 0 failed, 47.09 s. Latencies move between processes. The table above is the release-report process.
+
+### 5.2 Hostile storm
+
+Eight unpinned threads thrashed one shared 16 MB buffer. `GetSystemTimes` over the sample window reported CPU busy 100.0%. The sentinel classified 8 of 8 scripted regimes with 0 misses (authenticated idle, nominal quiet, thermal surge, surge plus light noise, memory pressure, memory pressure plus light noise, spoofed dual spike, spoofed partial authentication). The ALU mix inside the storm ran 9,598 jobs and 0 bit errors. Tax, cipher, and hybrid matched the oracle (622, 0 extra bit errors, accumulator 136). Mixed latency was p50 5.5 µs, p95 20.1 µs, p99 2,028.7 µs, max 10,709.0 µs, over 1,181 samples. The p99 is the tail of a machine already at full load, and the error count stayed 0.
+
+### 5.3 Endurance
+
+Ten thousand cycles, twenty thousand jobs, five buckets of two thousand. Every bucket reported 0 bit flips, a zero-magnitude \(|Y|\) of 0.000, and the four plateaus −0.600, −0.200, +0.200, +0.600. Deadlocks 0. Overflows 0. Working-set growth on this process was 12,288 bytes, which is inside the 32 MB fail ceiling. Latency p50 2.4 µs, p95 3.0 µs, p99 23.3 µs, max 3,966.5 µs, \(n = 10{,}000\).
+
+### 5.4 Ring-bus collision
+
+One D3D device. The CPU ALU on the main thread and the GPU thread overlapped for 200 iterations with no per-iteration barrier. CPU bit errors 0. GPU cipher bit errors 0 out of 51,200 bits. Vision misses 0 out of 200, and all 8 pattern kinds matched. CPU op latency p50 20.2 µs, p99 36.8 µs. The combined sample latency was p50 206.2 µs, p95 882.3 µs, p99 972.9 µs, max 1,376.0 µs, \(n = 800\).
+
+### 5.5 Fuzzer, 1,014,247 bits
+
+The CPU fuzzer drew 50,000 operations from xorshift64 (seed `0xDCC57E55A11C0001`) plus 13 corners. Progress at 10,000, 25,000, and 50,000 showed 0 bit errors. The GPU then issued 500 cipher dispatches. CPU bit errors 0. GPU bit errors 0 out of 64,000 bits. Compared bits 1,014,247. BER 0.000000%. The accounting is \(50{,}013 \times 19 + 500 \times 16 \times 8\). GPU block latency p50 162.7 µs, p99 354.4 µs. The CPU series was p50 5.1 µs, p95 17.9 µs, p99 22.2 µs, max 2,304.5 µs, \(n = 50{,}013\).
+
+The C ABI smoke measured one cold GhostVault block, including device construction and both the XOR and the ADD dispatch, at 1,720.4 µs, status 0, ciphertext `5D D5 A4 F3 41 56 CE C7 E0 E7 8F D8 DF 9B AB 8D`. The steady-state block time is the fuzzer figure, 162.7 µs p50, not the cold-start figure.
+
+### 5.6 Vision cliff
+
+| Flipped pixels | Fraction | Accuracy | Mean confidence | Trials |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.00% | 100% | 25.000 | 40/40 |
+| 4 | 6.25% | 100% | 21.000 | 40/40 |
+| 8 | 12.50% | 100% | 17.000 | 40/40 |
+| 12 | 18.75% | 100% | 13.000 | 40/40 |
+| 16 | 25.00% | 80% | 9.500 | 32/40 |
+| 20 | 31.25% | 75% | 5.650 | 30/40 |
+| 24 | 37.50% | 60% | 3.450 | 24/40 |
+| 28 | 43.75% | 40% | 1.850 | 16/40 |
+
+The guaranteed band is 0 through 12 flips. The first level that missed was 16 flips (25.00%). Latency p50 941.3 µs, p95 1,037.5 µs, p99 1,181.8 µs, max 1,961.7 µs, \(n = 322\).
+
+### 5.7 Digit network
+
+The same noise schedule, seed `0xC0FFEE`, one carried xorshift, digit = trial mod 10, 40 trials per level. GPU scores matched the host on every trial (`mismatches 0`).
+
+| Flipped pixels | Fraction | Accuracy | Mean winner score | Trials |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.00% | 100% | 64.00 | 40/40 |
+| 4 | 6.25% | 100% | 56.00 | 40/40 |
+| 8 | 12.50% | 100% | 48.00 | 40/40 |
+| 12 | 18.75% | 100% | 40.00 | 40/40 |
+| 16 | 25.00% | 100% | 32.00 | 40/40 |
+| 20 | 31.25% | 100% | 24.00 | 40/40 |
+| 24 | 37.50% | 82.50% | 16.50 | 33/40 |
+| 28 | 43.75% | 10.00% | 12.40 | 4/40 |
+
+Clean glyphs were 10/10. The asserted band is through 12 flips. On this draw the first miss was at 24 flips (37.50%). Dispatch latency after the device already existed: p50 164.9 µs, p99 411.1 µs. A cold ABI inference of glyph 3, which also creates the device, returned class 3, status 0, in 2,120.3 µs.
+
+### 5.8 Ising
+
+| Graph | Edges | Greedy cut / \(E\) | GPU cut / \(E\) | GPU µs |
+| --- | ---: | ---: | ---: | ---: |
+| Star forest | 56 | 56 / −56 | 56 / −56 | 2,063.2 |
+| Dense Möbius ladder | 90 | 60 / −30 | 87 / −84 | 892.3 |
+| Random spin glass | 96 | 76 / −56 | 96 / −96 | 814.6 |
+| Bipartite grid | 112 | 103 / −94 | 112 / −112 | 789.1 |
+| Odd-cycle web | 60 | 48 / −36 | 36 / −36 | 847.8 |
+
+GPU energy is at or below the greedy energy on every graph. The odd-cycle web ties at \(E = -36\) with a lower cut because spins that settled at 0 are not cut edges. The C ABI solve of the star forest returned status 0, energy −56, cut 56, in 2,122.6 µs including shader compilation on that call.
+
+## 6. Future outlook
+
+The ratio in Section 2 does not require a `lock` prefix. It requires two accumulators that share a scale. A time-domain ASIC can replace the cache-line banks with a pair of delay lines, or a pair of pulse counters, clocked in picoseconds, and still emit \(Y\). The common-mode proof is unchanged: \(\alpha(T, f)\) cancels whenever it multiplies both rails. The quaternary plateaus become four calibrated separations rather than four atomic occupancies. The ternary network’s zero-skip becomes a wire that is simply absent. The paradox zero remains the balanced rail, the state a Boolean latch cannot hold. The laptop results in Section 5 are the software measurement of that ratio on parts that already ship. They are the reason a picosecond differential fabric is a scaling of this ALU, not a different algebra.
+
+## References in this tree
+
+The executable argument is the source of `aether-dcc-sdk` together with the scorecard in Section 5. Shader text for the digit net and GhostVault is under `src/shaders/`. Vision and Ising HLSL are built in `src/gpu.rs` when `d3dcompiler_47` compiles them, so the pedestal, the degree, and the named groupshared banks stay consistent with the host constants.
