@@ -2,6 +2,8 @@
 //! Two devices are never constructed together.
 
 use std::ffi::c_void;
+use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -367,16 +369,29 @@ fn dxbc_ok(bytes: &[u8]) -> bool {
     declared == bytes.len() as u32
 }
 
+fn tmp_seq() -> u64 {
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
 fn write_shader_file(path: &std::path::Path, bytes: &[u8]) {
     let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("shader.bin");
-    let tmp = path.with_file_name(format!("{file_name}.tmp.{}", std::process::id()));
-    if std::fs::write(&tmp, bytes).is_err() {
+    let tmp = path.with_file_name(format!(
+        "{file_name}.tmp.{}.{}",
+        std::process::id(),
+        tmp_seq()
+    ));
+    let write_tmp = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        Ok(())
+    };
+    if write_tmp().is_err() {
+        let _ = std::fs::remove_file(&tmp);
         return;
     }
-    // Windows `rename` does not replace an existing destination.
-    let _ = std::fs::remove_file(path);
     if std::fs::rename(&tmp, path).is_err() {
-        let _ = std::fs::copy(&tmp, path);
         let _ = std::fs::remove_file(&tmp);
     }
 }

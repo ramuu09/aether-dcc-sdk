@@ -4,7 +4,7 @@
 //! Each channel takes three RDTSC differential pairs (`SAMPLES` is 3) and
 //! keeps the median.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::MutexGuard;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -89,7 +89,6 @@ struct ControlHead {
     sweep_done: AtomicU32,
     sensor_ready: AtomicU32,
     stop: AtomicBool,
-    main: AtomicUsize,
 }
 
 #[repr(C, align(256))]
@@ -136,13 +135,6 @@ pub struct ClassReading {
 fn demote_worker() {
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-    }
-}
-
-fn poke_main(control: &ControlHead) {
-    let raw = control.main.load(Ordering::Acquire);
-    if raw != 0 {
-        unsafe { (*(raw as *const thread::Thread)).unpark() };
     }
 }
 
@@ -254,7 +246,7 @@ fn sweep_bank(bank: &CacheBank) -> ([f64; 4], f64) {
     (raw, race_acc / race_n)
 }
 
-fn synapse_worker(addr: usize, index: usize, _cpu: usize) {
+fn synapse_worker(addr: usize, index: usize, _cpu: usize, main_thread: thread::Thread) {
     demote_worker();
     let bank = unsafe { &*(addr as *const CacheBank) };
     let control = &bank.control;
@@ -276,11 +268,11 @@ fn synapse_worker(addr: usize, index: usize, _cpu: usize) {
                 }
                 seen_epoch = epoch;
                 control.ready.fetch_add(1, Ordering::Release);
-                poke_main(control);
+                main_thread.unpark();
             }
             if control.park_flag.load(Ordering::Acquire) != 0 {
                 control.asleep.fetch_add(1, Ordering::Release);
-                poke_main(control);
+                main_thread.unpark();
                 while !control.stop.load(Ordering::Acquire)
                     && control.phase.load(Ordering::Acquire) != PHASE_STOP
                     && control.park_flag.load(Ordering::Acquire) != 0
@@ -319,12 +311,12 @@ fn synapse_worker(addr: usize, index: usize, _cpu: usize) {
     }
 }
 
-fn sensor_worker(addr: usize) {
+fn sensor_worker(addr: usize, main_thread: thread::Thread) {
     demote_worker();
     let bank = unsafe { &*(addr as *const CacheBank) };
     let control = &bank.control;
     control.sensor_ready.store(1, Ordering::Release);
-    poke_main(control);
+    main_thread.unpark();
     let mut seen = 0u32;
     loop {
         if control.stop.load(Ordering::Acquire) {
@@ -341,8 +333,48 @@ fn sensor_worker(addr: usize) {
         }
         bank.race_bits.store(race_us.to_bits(), Ordering::Release);
         control.sweep_done.store(job, Ordering::Release);
-        poke_main(control);
+        main_thread.unpark();
         seen = job;
+    }
+}
+
+/// If `Sentinel::new` panics while workers exist, join them before the page is freed.
+struct SpawnGuard {
+    page: *mut CacheBank,
+    ctrl: *const ControlHead,
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl SpawnGuard {
+    fn disarm(&mut self) -> Vec<JoinHandle<()>> {
+        self.page = std::ptr::null_mut();
+        self.ctrl = std::ptr::null();
+        std::mem::take(&mut self.threads)
+    }
+}
+
+impl Drop for SpawnGuard {
+    fn drop(&mut self) {
+        if self.page.is_null() {
+            return;
+        }
+        unsafe {
+            let control = &*self.ctrl;
+            control.stop.store(true, Ordering::Release);
+            control.phase.store(PHASE_STOP, Ordering::Release);
+            control.park_flag.store(0, Ordering::Release);
+        }
+        for worker in &self.threads {
+            worker.thread().unpark();
+        }
+        for worker in self.threads.drain(..) {
+            let _ = worker.join();
+        }
+        unsafe {
+            VirtualFree(self.page.cast(), 0, MEM_RELEASE);
+            self.page = std::ptr::null_mut();
+            self.ctrl = std::ptr::null();
+        }
     }
 }
 
@@ -352,7 +384,6 @@ pub struct Sentinel {
     columns: [[f64; 4]; N_SYNAPSES],
     scales: [ChannelScale; N_CHANNELS],
     next_sweep: u32,
-    notify: Box<thread::Thread>,
     _guard: MutexGuard<'static, ()>,
 }
 
@@ -371,8 +402,6 @@ impl Sentinel {
             return Err("VirtualAlloc failed".into());
         }
         let page = page.cast::<CacheBank>();
-        let notify = Box::new(thread::current());
-        let main_addr = (&*notify as *const thread::Thread) as usize;
         unsafe {
             let bank = &*page;
             std::ptr::write(std::ptr::addr_of!(bank.control).cast_mut(), ControlHead {
@@ -386,8 +415,15 @@ impl Sentinel {
                 sweep_done: AtomicU32::new(0),
                 sensor_ready: AtomicU32::new(0),
                 stop: AtomicBool::new(false),
-                main: AtomicUsize::new(main_addr),
             });
+        }
+        let mut spawning = SpawnGuard {
+            page,
+            ctrl: unsafe { std::ptr::addr_of!((*page).control) },
+            threads: Vec::with_capacity(4),
+        };
+        unsafe {
+            let bank = &*spawning.page;
             for line in &bank.lines {
                 std::ptr::write(std::ptr::addr_of!(line.arena).cast_mut(), AtomicU64::new(0));
             }
@@ -402,30 +438,32 @@ impl Sentinel {
             }
             std::ptr::write(std::ptr::addr_of!(bank.race_bits).cast_mut(), AtomicU64::new(0));
         }
-        let mut threads = Vec::with_capacity(4);
-        let addr = page as usize;
-        threads.push(
+        let main_thread = thread::current();
+        let addr = spawning.page as usize;
+        let sensor_wake = main_thread.clone();
+        spawning.threads.push(
             thread::Builder::new()
                 .name("dcc-stress-sentinel-sensor".into())
-                .spawn(move || sensor_worker(addr))
+                .spawn(move || sensor_worker(addr, sensor_wake))
                 .expect("spawn sentinel sensor"),
         );
         for (index, cpu) in SYNAPSE_CPUS.into_iter().enumerate() {
-            let addr = page as usize;
-            threads.push(
+            let addr = spawning.page as usize;
+            let wake = main_thread.clone();
+            spawning.threads.push(
                 thread::Builder::new()
                     .name(format!("dcc-stress-sentinel-synapse-{index}"))
-                    .spawn(move || synapse_worker(addr, index, cpu))
+                    .spawn(move || synapse_worker(addr, index, cpu, wake))
                     .expect("spawn sentinel synapse"),
             );
         }
+        let threads = spawning.disarm();
         let mut layer = Self {
             page,
             threads,
             columns: diagnostic_columns(),
             scales: [ChannelScale { zero_bias: 0.0, y_pos: 1.0, y_neg: -1.0 }; N_CHANNELS],
             next_sweep: 1,
-            notify,
             _guard: guard,
         };
         layer.wait_asleep()?;
@@ -584,7 +622,6 @@ impl Sentinel {
 
 impl Drop for Sentinel {
     fn drop(&mut self) {
-        let _keep_notifier = &self.notify;
         if self.page.is_null() {
             return;
         }

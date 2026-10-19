@@ -40,7 +40,13 @@ fn breathe_since(alu: &Alu, jobs_before: u64) {
     crate::ThermalGovernor::after_contention(count);
 }
 
-fn alu_bits(alu: &mut Alu, op: u8, a: u16, b: u16) -> Result<(u64, u64, f64), String> {
+fn alu_bits(
+    alu: &mut Alu,
+    samples: &mut Vec<f64>,
+    op: u8,
+    a: u16,
+    b: u16,
+) -> Result<(u64, u64, f64), String> {
     let jobs_before = alu.jobs();
     let started = Instant::now();
     let raced = match op {
@@ -53,8 +59,15 @@ fn alu_bits(alu: &mut Alu, op: u8, a: u16, b: u16) -> Result<(u64, u64, f64), St
         _ => alu.cmp_u16(a, b),
     };
     let us = elapsed_us(started);
+    let (got, flags) = match raced {
+        Ok(pair) => pair,
+        Err(error) => {
+            breathe_since(alu, jobs_before);
+            return Err(error);
+        }
+    };
+    samples.push(us);
     breathe_since(alu, jobs_before);
-    let (got, flags) = raced?;
     let (expect, expect_flags) = native_op(op, a, b);
     let mut errors = u64::from((got ^ expect).count_ones());
     errors += flag_mismatches(flags, expect_flags);
@@ -145,11 +158,10 @@ pub fn stress_hostile_os_storm() -> ScenarioReport {
         let op = (index % 7) as u8;
         let a = rng.next() as u16;
         let b = rng.next() as u16;
-        match alu_bits(&mut alu, op, a, b) {
-            Ok((bad, _bits, us)) => {
+        match alu_bits(&mut alu, &mut samples, op, a, b) {
+            Ok((bad, _bits, _us)) => {
                 errors += bad;
                 ops += 1;
-                samples.push(us);
             }
             Err(error) => {
                 log(format!("  ALU op {index} failed: {error}"));
@@ -176,9 +188,15 @@ fn run_studio_apps(alu: &mut Alu, samples: &mut Vec<f64>, errors: &mut u64, ops:
         let started = Instant::now();
         let pair = alu.cmp_u16(gross, 500);
         let us = elapsed_us(started);
-        breathe_since(alu, jobs_before);
-        let pair = pair?;
+        let pair = match pair {
+            Ok(pair) => pair,
+            Err(error) => {
+                breathe_since(alu, jobs_before);
+                return Err(error);
+            }
+        };
         samples.push(us);
+        breathe_since(alu, jobs_before);
         *ops += 1;
         pair
     };
@@ -240,9 +258,15 @@ fn run_studio_apps(alu: &mut Alu, samples: &mut Vec<f64>, errors: &mut u64, ops:
         let started = Instant::now();
         let pair = alu.cmp_u16(acc, HYBRID_THRESHOLD);
         let us = elapsed_us(started);
-        breathe_since(alu, jobs_before);
-        let pair = pair?;
+        let pair = match pair {
+            Ok(pair) => pair,
+            Err(error) => {
+                breathe_since(alu, jobs_before);
+                return Err(error);
+            }
+        };
         samples.push(us);
+        breathe_since(alu, jobs_before);
         *ops += 1;
         pair
     };
@@ -280,9 +304,15 @@ fn timed(
         _ => alu.add_u16(a, b),
     };
     let us = elapsed_us(started);
-    breathe_since(alu, jobs_before);
-    let pair = raced?;
+    let pair = match raced {
+        Ok(pair) => pair,
+        Err(error) => {
+            breathe_since(alu, jobs_before);
+            return Err(error);
+        }
+    };
     samples.push(us);
+    breathe_since(alu, jobs_before);
     *ops += 1;
     let (expect, expect_flags) = native_op(op, a, b);
     *errors += u64::from((pair.0 ^ expect).count_ones());
@@ -310,9 +340,15 @@ fn byte_op(
         _ => alu.not_u16(u16::from(a)),
     };
     let us = elapsed_us(started);
-    breathe_since(alu, jobs_before);
-    let (full, flags) = raced?;
+    let (full, flags) = match raced {
+        Ok(pair) => pair,
+        Err(error) => {
+            breathe_since(alu, jobs_before);
+            return Err(error);
+        }
+    };
     samples.push(us);
+    breathe_since(alu, jobs_before);
     *ops += 1;
     let (expect, expect_flags) = native_op(op, u16::from(a), u16::from(b));
     *errors += u64::from((full ^ expect).count_ones());
@@ -455,10 +491,9 @@ pub fn stress_concurrent_cpu_gpu_collision() -> ScenarioReport {
     for index in 0..COOL_COLLISION as u16 {
         let a = index.wrapping_mul(17).wrapping_add(3);
         let b = index.wrapping_mul(29).wrapping_add(9);
-        match alu_bits(&mut alu, 0, a, b) {
-            Ok((bad, _, us)) => {
+        match alu_bits(&mut alu, &mut cpu_samples, 0, a, b) {
+            Ok((bad, _, _us)) => {
                 cpu_errors += bad;
-                cpu_samples.push(us);
             }
             Err(error) => {
                 cpu_errors += 16;
@@ -560,11 +595,10 @@ pub fn stress_adversarial_alu_fuzzer() -> ScenarioReport {
         let op = (rng.next() % 7) as u8;
         let a = rng.next() as u16;
         let b = rng.next() as u16;
-        match alu_bits(&mut alu, op, a, b) {
-            Ok((bad, compared, us)) => {
+        match alu_bits(&mut alu, &mut samples, op, a, b) {
+            Ok((bad, compared, _us)) => {
                 errors += bad;
                 bits += compared;
-                samples.push(us);
             }
             Err(error) => {
                 log(format!("  fuzzer deadlock at {index}: {error}"));
@@ -592,11 +626,10 @@ pub fn stress_adversarial_alu_fuzzer() -> ScenarioReport {
         (6, 0xFFFF, 0xFFFF),
     ];
     for (op, a, b) in corners {
-        match alu_bits(&mut alu, op, a, b) {
-            Ok((bad, compared, us)) => {
+        match alu_bits(&mut alu, &mut samples, op, a, b) {
+            Ok((bad, compared, _us)) => {
                 errors += bad;
                 bits += compared;
-                samples.push(us);
             }
             Err(error) => {
                 log(format!("  corner {op} {a:#06X} {b:#06X} failed: {error}"));
@@ -1075,9 +1108,15 @@ fn script_tax(alu: &mut Alu, samples: &mut Vec<f64>, errors: &mut u64, ops: &mut
     let started = Instant::now();
     let raced = alu.cmp_u16(gross, 500);
     let us = elapsed_us(started);
-    breathe_since(alu, jobs_before);
-    let (diff, flags) = raced?;
+    let (diff, flags) = match raced {
+        Ok(pair) => pair,
+        Err(error) => {
+            breathe_since(alu, jobs_before);
+            return Err(error);
+        }
+    };
     samples.push(us);
+    breathe_since(alu, jobs_before);
     *ops += 1;
     let (expect_diff, expect_flags) = native_sub_flags(gross, 500);
     *errors += u64::from((diff ^ expect_diff).count_ones());

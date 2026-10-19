@@ -94,22 +94,22 @@ The theory and the drift-cancellation proof are in [WHITE_PAPER.md](WHITE_PAPER.
 
 ## Benchmark
 
-Host: Intel i5-10210U, DXGI adapter `Intel(R) UHD Graphics`, vendor `0x8086`, device `0x9B41`, feature level 11.1. The cool table is the warm `cargo run --release -- --product-benchmark` on 2026-10-19 (command wall clock 0.86 s, exit 0). Latencies are microseconds. The retired table under it is the earlier long hostile campaign of 2026-10-18. That campaign is not what the command prints now.
+Host: Intel i5-10210U, DXGI adapter `Intel(R) UHD Graphics`, vendor `0x8086`, device `0x9B41`, feature level 11.1. The cool table is `cargo run --release -- --product-benchmark` on 2026-10-19 after the follow-up fixes (exit 0; Cargo `Finished` in 1.22 s on the rebuild; stopwatch 2.209 s including that compile). Latencies are microseconds. The retired table under it is the earlier long hostile campaign of 2026-10-18. That campaign is not what the command prints now.
 
 | Scenario | Ops/Cycles | Latency p50 / p99 µs | Errors | Status |
 | --- | ---: | ---: | ---: | --- |
-| Cool sentinel pass | 189 | 297.9 / 9,512.7 | 0 | PASS |
-| Endurance, 32 cycles | 32 | 37.7 / 124.0 | 0 | PASS |
-| CPU + UHD collision | 8 | 477.0 / 2,245.2 | 0 | PASS |
-| Adversarial fuzzer, 32 ops | 49 | 93.2 / 460.3 | 0 | PASS |
-| Vision noise cliff | 10 | 1,168.2 / 2,423.2 | 0 | PASS |
-| Paradox and Ising graphs | 221 | 103.8 / 1,685.0 | 0 | PASS |
+| Cool sentinel pass | 189 | 302.9 / 9,416.6 | 0 | PASS |
+| Endurance, 32 cycles | 32 | 39.3 / 64.4 | 0 | PASS |
+| CPU + UHD collision | 8 | 616.0 / 5,582.7 | 0 | PASS |
+| Adversarial fuzzer, 32 ops | 49 | 294.3 / 1,094.2 | 0 | PASS |
+| Vision noise cliff | 10 | 1,092.9 / 5,177.8 | 0 | PASS |
+| Paradox and Ising graphs | 221 | 96.5 / 2,502.5 | 0 | PASS |
 
-Six of six scenarios passed. The sentinel classified 8/8 with 0 class misses and 0 bit errors. The pass rule allows at most one class miss. Endurance p99 is 124.0 µs and the fuzzer p99 is 460.3 µs. The collision CPU-op line printed p50 392.2 µs and p99 958.7 µs. The fuzzer compared 1,367 bits at 0.000000% BER. Endurance kept the four plateaus, full-scale counts 12/0, 0/12, and 4/4, with 0 deadlocks and 0 overflows. BitNet matched the host (p50 456.5 µs, p99 937.5 µs): 10/10 clean glyphs, 100% through 20 flips, and 0% at 24 and 28. The printed SNR breakdown is 24 flipped pixels. Vision was 100% through 24 flips and 0% at 28, and its printed SNR breakdown is 28 flipped pixels. `cargo test --release -- --test-threads=1` finished 10 passed, 0 failed, in 0.69 s once `shader-cache/` held the Ising bytecode. The process that compiled and wrote that cache finished in 40.55 s. With the studio window open and idle, an earlier sample of this message loop accumulated 0.000 ms of processor time across an 800 ms window.
+Six of six scenarios passed. The sentinel classified 8/8 with 0 class misses and 0 bit errors. The pass rule allows at most one class miss. Endurance p99 is 64.4 µs and the fuzzer p99 is 1,094.2 µs. The collision CPU-op line printed p50 432.8 µs and p99 878.8 µs. The fuzzer compared 1,367 bits at 0.000000% BER. Endurance kept the four plateaus, full-scale counts 12/0, 0/12, and 4/4, with 0 deadlocks and 0 overflows. BitNet matched the host (p50 434.4 µs, p99 5,434.3 µs): 10/10 clean glyphs, 100% through 20 flips, and 0% at 24 and 28. The printed SNR breakdown is 24 flipped pixels. Vision was 100% through 24 flips and 0% at 28, and its printed SNR breakdown is 28 flipped pixels. `cargo test --release -- --test-threads=1` finished 10 passed, 0 failed, in 0.61 s once `shader-cache/` held the Ising bytecode. Cargo reported `Finished` in 5.70 s on that rebuild. The process that compiled and wrote that cache finished in 40.55 s. With the studio window open and idle, an earlier sample of this message loop accumulated 0.000 ms of processor time across an 800 ms window.
 
 ### One-sided preemption ablation
 
-`cargo run --release -- --product-benchmark` prints this table after the six scenarios. The cool process printed `product pillars bitnet PASS stress PASS ablation PASS`, `elapsed 1.071 ms`, `CPU burn threads 0`, and `CPU busy 0.0%` across that window. Each of 500 trials receives one 5,000,000-tick stall on the negative rail of group 0. The turn row is five parked ALU probes. Plateau centers are the median \(Y\) of each symbol. The naive medians sit near −1 because the stall is on every trial. The −3 class still decodes correctly, which is why the symbol-error rate is 80% and not 100%.
+`cargo run --release -- --product-benchmark` prints this table after the six scenarios. The cool process printed `product pillars bitnet PASS stress PASS ablation PASS`, `elapsed 0.966 ms`, `CPU burn threads 0`, and `CPU busy 0.0%` across that window. Each of 500 trials receives one 5,000,000-tick stall on the negative rail of group 0. The turn row is five parked ALU probes. Plateau centers are the median \(Y\) of each symbol. The naive medians sit near −1 because the stall is on every trial. The −3 class still decodes correctly, which is why the symbol-error rate is 80% and not 100%.
 
 | Estimator | Median Y (−3, −1, 0, +1, +3) | Symbol errors |
 | :--- | :---: | :---: |
