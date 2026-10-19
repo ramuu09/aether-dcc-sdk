@@ -1,10 +1,10 @@
 //! Continuous-timing telemetry classifier.
 //!
 //! Workers are unpinned and below normal priority. Between sweeps they park.
-//! The timed window is still an RDTSC `lock xadd` hammer, bounded to one
-//! sample per channel.
+//! Each channel takes three RDTSC differential pairs (`SAMPLES` is 3) and
+//! keeps the median.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::MutexGuard;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -89,6 +89,7 @@ struct ControlHead {
     sweep_done: AtomicU32,
     sensor_ready: AtomicU32,
     stop: AtomicBool,
+    main: AtomicUsize,
 }
 
 #[repr(C, align(256))]
@@ -135,6 +136,13 @@ pub struct ClassReading {
 fn demote_worker() {
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+fn poke_main(control: &ControlHead) {
+    let raw = control.main.load(Ordering::Acquire);
+    if raw != 0 {
+        unsafe { (*(raw as *const thread::Thread)).unpark() };
     }
 }
 
@@ -268,9 +276,11 @@ fn synapse_worker(addr: usize, index: usize, _cpu: usize) {
                 }
                 seen_epoch = epoch;
                 control.ready.fetch_add(1, Ordering::Release);
+                poke_main(control);
             }
             if control.park_flag.load(Ordering::Acquire) != 0 {
                 control.asleep.fetch_add(1, Ordering::Release);
+                poke_main(control);
                 while !control.stop.load(Ordering::Acquire)
                     && control.phase.load(Ordering::Acquire) != PHASE_STOP
                     && control.park_flag.load(Ordering::Acquire) != 0
@@ -314,6 +324,7 @@ fn sensor_worker(addr: usize) {
     let bank = unsafe { &*(addr as *const CacheBank) };
     let control = &bank.control;
     control.sensor_ready.store(1, Ordering::Release);
+    poke_main(control);
     let mut seen = 0u32;
     loop {
         if control.stop.load(Ordering::Acquire) {
@@ -330,6 +341,7 @@ fn sensor_worker(addr: usize) {
         }
         bank.race_bits.store(race_us.to_bits(), Ordering::Release);
         control.sweep_done.store(job, Ordering::Release);
+        poke_main(control);
         seen = job;
     }
 }
@@ -340,6 +352,7 @@ pub struct Sentinel {
     columns: [[f64; 4]; N_SYNAPSES],
     scales: [ChannelScale; N_CHANNELS],
     next_sweep: u32,
+    notify: Box<thread::Thread>,
     _guard: MutexGuard<'static, ()>,
 }
 
@@ -358,6 +371,8 @@ impl Sentinel {
             return Err("VirtualAlloc failed".into());
         }
         let page = page.cast::<CacheBank>();
+        let notify = Box::new(thread::current());
+        let main_addr = (&*notify as *const thread::Thread) as usize;
         unsafe {
             let bank = &*page;
             std::ptr::write(std::ptr::addr_of!(bank.control).cast_mut(), ControlHead {
@@ -371,6 +386,7 @@ impl Sentinel {
                 sweep_done: AtomicU32::new(0),
                 sensor_ready: AtomicU32::new(0),
                 stop: AtomicBool::new(false),
+                main: AtomicUsize::new(main_addr),
             });
             for line in &bank.lines {
                 std::ptr::write(std::ptr::addr_of!(line.arena).cast_mut(), AtomicU64::new(0));
@@ -409,6 +425,7 @@ impl Sentinel {
             columns: diagnostic_columns(),
             scales: [ChannelScale { zero_bias: 0.0, y_pos: 1.0, y_neg: -1.0 }; N_CHANNELS],
             next_sweep: 1,
+            notify,
             _guard: guard,
         };
         layer.wait_asleep()?;
@@ -424,10 +441,12 @@ impl Sentinel {
         for channel in 0..N_CHANNELS {
             outputs[channel] = normalize(raw[channel], &self.scales[channel]);
         }
+        let latency_us = started.elapsed().as_secs_f64() * 1.0e6;
+        crate::ThermalGovernor::after_contention(1);
         Ok(ClassReading {
             outputs,
             predicted: argmax4(outputs),
-            latency_us: started.elapsed().as_secs_f64() * 1.0e6,
+            latency_us,
         })
     }
 
@@ -479,7 +498,7 @@ impl Sentinel {
         self.threads[0].thread().unpark();
         let start = Instant::now();
         while control.sweep_done.load(Ordering::Acquire) != job {
-            thread::sleep(Duration::from_millis(1));
+            thread::park_timeout(Duration::from_millis(1));
             if start.elapsed().as_millis() > 8_000 {
                 return Err("sentinel sweep timed out".into());
             }
@@ -530,7 +549,7 @@ impl Sentinel {
         let control = unsafe { &(*self.page).control };
         let start = Instant::now();
         while control.asleep.load(Ordering::Acquire) < N_SYNAPSES as u32 {
-            thread::sleep(Duration::from_millis(1));
+            thread::park_timeout(Duration::from_millis(1));
             if start.elapsed().as_millis() > 4_000 {
                 return Err("sentinel synapses did not park".into());
             }
@@ -542,7 +561,7 @@ impl Sentinel {
         let control = unsafe { &(*self.page).control };
         let start = Instant::now();
         while control.ready.load(Ordering::Acquire) < N_SYNAPSES as u32 {
-            thread::sleep(Duration::from_millis(1));
+            thread::park_timeout(Duration::from_millis(1));
             if start.elapsed().as_millis() > 4_000 {
                 return Err("sentinel synapses missed the epoch".into());
             }
@@ -554,7 +573,7 @@ impl Sentinel {
         let control = unsafe { &(*self.page).control };
         let start = Instant::now();
         while control.sensor_ready.load(Ordering::Acquire) == 0 {
-            thread::sleep(Duration::from_millis(1));
+            thread::park_timeout(Duration::from_millis(1));
             if start.elapsed().as_millis() > 4_000 {
                 return Err("sentinel sensor did not start".into());
             }
@@ -565,6 +584,7 @@ impl Sentinel {
 
 impl Drop for Sentinel {
     fn drop(&mut self) {
+        let _keep_notifier = &self.notify;
         if self.page.is_null() {
             return;
         }

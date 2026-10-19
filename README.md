@@ -94,22 +94,22 @@ The theory and the drift-cancellation proof are in [WHITE_PAPER.md](WHITE_PAPER.
 
 ## Benchmark
 
-Host: Intel i5-10210U, DXGI adapter `Intel(R) UHD Graphics`, vendor `0x8086`, device `0x9B41`, feature level 11.1. The cool table is the warm `cargo run --release -- --product-benchmark` on 2026-10-18 (command wall clock 0.88 s, exit 0). Latencies are microseconds. The retired table under it is the earlier long hostile campaign on the same date. That campaign is not what the command prints now.
+Host: Intel i5-10210U, DXGI adapter `Intel(R) UHD Graphics`, vendor `0x8086`, device `0x9B41`, feature level 11.1. The cool table is the warm `cargo run --release -- --product-benchmark` on 2026-10-19 (command wall clock 0.86 s, exit 0). Latencies are microseconds. The retired table under it is the earlier long hostile campaign of 2026-10-18. That campaign is not what the command prints now.
 
 | Scenario | Ops/Cycles | Latency p50 / p99 µs | Errors | Status |
 | --- | ---: | ---: | ---: | --- |
-| Cool sentinel pass | 189 | 379.0 / 13,618.4 | 1 | PASS |
-| Endurance, 32 cycles | 32 | 39.9 / 1,663.8 | 0 | PASS |
-| CPU + UHD collision | 8 | 497.6 / 2,247.7 | 0 | PASS |
-| Adversarial fuzzer, 32 ops | 49 | 40.5 / 2,234.0 | 0 | PASS |
-| Vision noise cliff | 10 | 1,025.9 / 1,722.5 | 0 | PASS |
-| Paradox and Ising graphs | 221 | 70.3 / 1,752.2 | 0 | PASS |
+| Cool sentinel pass | 189 | 297.9 / 9,512.7 | 0 | PASS |
+| Endurance, 32 cycles | 32 | 37.7 / 124.0 | 0 | PASS |
+| CPU + UHD collision | 8 | 477.0 / 2,245.2 | 0 | PASS |
+| Adversarial fuzzer, 32 ops | 49 | 93.2 / 460.3 | 0 | PASS |
+| Vision noise cliff | 10 | 1,168.2 / 2,423.2 | 0 | PASS |
+| Paradox and Ising graphs | 221 | 103.8 / 1,685.0 | 0 | PASS |
 
-Six of six scenarios passed. The one error on the sentinel row is a class miss (`Nominal quiet, auth on` read `SPOOFED_TELEMETRY_ANOMALY`). Bit errors on that row were 0. The pass rule allows at most one class miss. The fuzzer compared 1,367 bits at 0.000000% BER. Endurance kept the four plateaus, full-scale counts 12/0, 0/12, and 4/4, with 0 deadlocks and 0 overflows. BitNet matched the host (p50 438.0 µs, p99 1,257.2 µs): 10/10 clean glyphs, and 1/1 at 12 flips. `cargo test --release -- --test-threads=1` finished 9 passed, 0 failed, in 0.60 s once `shader-cache/` held the Ising bytecode. The process that compiled and wrote that cache finished in 40.55 s. With the studio window open and idle, the process accumulated 0.000 ms of processor time across an 800 ms sample.
+Six of six scenarios passed. The sentinel classified 8/8 with 0 class misses and 0 bit errors. The pass rule allows at most one class miss. Endurance p99 is 124.0 µs and the fuzzer p99 is 460.3 µs. The collision CPU-op line printed p50 392.2 µs and p99 958.7 µs. The fuzzer compared 1,367 bits at 0.000000% BER. Endurance kept the four plateaus, full-scale counts 12/0, 0/12, and 4/4, with 0 deadlocks and 0 overflows. BitNet matched the host (p50 456.5 µs, p99 937.5 µs): 10/10 clean glyphs, 100% through 20 flips, and 0% at 24 and 28. The printed SNR breakdown is 24 flipped pixels. Vision was 100% through 24 flips and 0% at 28, and its printed SNR breakdown is 28 flipped pixels. `cargo test --release -- --test-threads=1` finished 10 passed, 0 failed, in 0.69 s once `shader-cache/` held the Ising bytecode. The process that compiled and wrote that cache finished in 40.55 s. With the studio window open and idle, an earlier sample of this message loop accumulated 0.000 ms of processor time across an 800 ms window.
 
 ### One-sided preemption ablation
 
-`cargo run --release -- --product-benchmark` prints this table after the six scenarios. The cool process printed `product pillars bitnet PASS stress PASS ablation PASS`, `elapsed 0.823 ms`, and `CPU burn threads 0`. Each of 500 trials receives one 5,000,000-tick stall on the negative rail of group 0. The turn row is five parked ALU probes. Plateau centers are the median \(Y\) of each symbol. The naive medians sit near −1 because the stall is on every trial. The −3 class still decodes correctly, which is why the symbol-error rate is 80% and not 100%.
+`cargo run --release -- --product-benchmark` prints this table after the six scenarios. The cool process printed `product pillars bitnet PASS stress PASS ablation PASS`, `elapsed 1.071 ms`, `CPU burn threads 0`, and `CPU busy 0.0%` across that window. Each of 500 trials receives one 5,000,000-tick stall on the negative rail of group 0. The turn row is five parked ALU probes. Plateau centers are the median \(Y\) of each symbol. The naive medians sit near −1 because the stall is on every trial. The −3 class still decodes correctly, which is why the symbol-error rate is 80% and not 100%.
 
 | Estimator | Median Y (−3, −1, 0, +1, +3) | Symbol errors |
 | :--- | :---: | :---: |
@@ -117,9 +117,9 @@ Six of six scenarios passed. The one error on the sentinel row is a class miss (
 | Chopper + denominator gate | −0.600, −0.200, +0.000, +0.200, +0.600 | 0 / 500 (0.000000%, BER 0.000000%) |
 | Work-conserving turn pedestal | −0.600, −0.200, +0.000, +0.200, +0.600 | 0 / 500 (0.000000%, BER 0.000000%) |
 
-The same binary's release test `test_pillar6_preemption_ablation_naive_vs_hardened` printed the same three rates, elapsed 0.996 ms.
+The same binary's release test `test_pillar6_preemption_ablation_naive_vs_hardened` passed inside the 10-test suite.
 
-Retired live windows, same date, before the thermal patch. They are not the cells above. The product-benchmark window of that binary printed naive 1,239 / 10,000 (12.390%, BER 8.030000%) and 0 / 10,000 on the chopper and the turn pedestal, at CPU busy 100.0%. Its release test printed naive 2,304 / 10,000 (23.040%, BER 12.826667%) and again 0 / 10,000 on the other two rows, and the suite finished in 235.70 s. An earlier sum of every micro-slice duration, outside this crate, measured 4,266 / 10,000 (42.660%).
+Retired live windows from 2026-10-18, before the thermal patch. They are not the cells above. The product-benchmark window of that binary printed naive 1,239 / 10,000 (12.390%, BER 8.030000%) and 0 / 10,000 on the chopper and the turn pedestal, at CPU busy 100.0%. Its release test printed naive 2,304 / 10,000 (23.040%, BER 12.826667%) and again 0 / 10,000 on the other two rows, and the suite finished in 235.70 s. An earlier sum of every micro-slice duration, outside this crate, measured 4,266 / 10,000 (42.660%).
 
 Retired scorecard from the long hostile release-report process:
 

@@ -211,7 +211,9 @@ fn injected_groups(symbol: Symbol) -> Vec<(u64, u64)> {
 /// 500 synthetic trials. One negative-rail stall is added to group 0 of every trial.
 /// The turn row is one parked ALU probe per symbol; the stall is not a `lock xadd`.
 pub fn ablation_benchmark() -> Result<AblationReport, String> {
+    crate::ThermalGovernor::reset();
     let started = std::time::Instant::now();
+    let cpu_before = capture_cpu_stamp();
     let total = TRIALS_PER_SYMBOL * SYMBOLS.len();
     log("==== One-sided preemption ablation ====");
     log(format!(
@@ -239,10 +241,12 @@ pub fn ablation_benchmark() -> Result<AblationReport, String> {
             turn.push((symbol, Some(y)));
         }
     }
+    let probed = alu.jobs();
     drop(alu);
+    let cpu_after = capture_cpu_stamp();
     let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
-    let busy = cpu_busy_fraction(&capture_cpu_stamp(), &capture_cpu_stamp());
-    let _ = started;
+    let busy = cpu_busy_fraction(&cpu_before, &cpu_after);
+    crate::ThermalGovernor::after_contention(u32::try_from(probed).unwrap_or(u32::MAX));
     let report = AblationReport {
         busy,
         slice_iters: SLICE_ITERS,
@@ -303,6 +307,7 @@ mod tests {
 
     #[test]
     fn neg_stall_drives_the_sum_to_minus_one_and_the_gate_drops_it() {
+        crate::ThermalGovernor::reset();
         let mut crossings = 0usize;
         let mut chopper_errors = 0usize;
         for symbol in SYMBOLS {

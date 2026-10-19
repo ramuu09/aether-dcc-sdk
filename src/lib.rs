@@ -37,10 +37,21 @@ impl ThermalGovernor {
     pub const PEDESTAL: u32 = 4;
     const EVERY: u32 = 32;
 
+    fn ops() -> &'static std::sync::atomic::AtomicU32 {
+        static OPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        &OPS
+    }
+
+    /// Each scenario starts from zero so the 32-op gap does not depend on earlier tests.
+    pub fn reset() {
+        Self::ops().store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn after_contention(count: u32) {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static OPS: AtomicU32 = AtomicU32::new(0);
-        let total = OPS.fetch_add(count, Ordering::Relaxed).wrapping_add(count);
+        if count == 0 {
+            return;
+        }
+        let total = Self::ops().fetch_add(count, std::sync::atomic::Ordering::Relaxed).wrapping_add(count);
         if total / Self::EVERY != (total - count) / Self::EVERY {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -57,6 +68,7 @@ mod tests {
 
     #[test]
     fn stress_hostile_os_storm() {
+        super::ThermalGovernor::reset();
         let row = super::stress_hostile_os_storm();
         print_scorecard(std::slice::from_ref(&row));
         assert!(row.passed, "hostile storm recorded {} errors", row.errors);
@@ -64,6 +76,7 @@ mod tests {
 
     #[test]
     fn stress_endurance_marathon() {
+        super::ThermalGovernor::reset();
         let row = super::stress_endurance_marathon();
         print_scorecard(std::slice::from_ref(&row));
         assert!(row.passed, "endurance recorded {} errors", row.errors);
@@ -71,6 +84,7 @@ mod tests {
 
     #[test]
     fn stress_concurrent_cpu_gpu_collision() {
+        super::ThermalGovernor::reset();
         let row = super::stress_concurrent_cpu_gpu_collision();
         print_scorecard(std::slice::from_ref(&row));
         assert!(row.passed, "collision recorded {} errors", row.errors);
@@ -78,6 +92,7 @@ mod tests {
 
     #[test]
     fn stress_adversarial_alu_fuzzer() {
+        super::ThermalGovernor::reset();
         let row = super::stress_adversarial_alu_fuzzer();
         print_scorecard(std::slice::from_ref(&row));
         assert!(row.passed, "fuzzer recorded {} errors", row.errors);
@@ -85,6 +100,7 @@ mod tests {
 
     #[test]
     fn stress_vision_noise_cliff_and_zero_fix() {
+        super::ThermalGovernor::reset();
         let row = super::stress_vision_noise_cliff_and_zero_fix();
         print_scorecard(std::slice::from_ref(&row));
         assert!(row.passed, "vision cliff recorded {} errors", row.errors);
@@ -92,6 +108,7 @@ mod tests {
 
     #[test]
     fn stress_pathological_paradox_and_graphs() {
+        super::ThermalGovernor::reset();
         let row = super::stress_pathological_paradox_and_graphs();
         print_scorecard(std::slice::from_ref(&row));
         assert!(row.passed, "paradox/graphs recorded {} errors", row.errors);
@@ -99,6 +116,7 @@ mod tests {
 
     #[test]
     fn product_bitnet_digit10() {
+        super::ThermalGovernor::reset();
         let mut gpu = super::GpuEngine::new();
         let qa = super::digit_qa(&mut gpu);
         assert_eq!(qa.blank_max, 0, "empty canvas was not DC-centered");
@@ -109,6 +127,7 @@ mod tests {
 
     #[test]
     fn test_pillar6_preemption_ablation_naive_vs_hardened() {
+        super::ThermalGovernor::reset();
         let started = std::time::Instant::now();
         let report = super::ablation_benchmark().expect("ablation harness");
         let elapsed = started.elapsed();

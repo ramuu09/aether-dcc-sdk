@@ -314,41 +314,132 @@ fn shader_digest(source: &str, flags: u32) -> u64 {
     hash
 }
 
-fn shader_bytes(source: &str, name: &str, flags: u32) -> Vec<u8> {
-    use std::sync::Mutex;
-    static CACHE: Mutex<Vec<(String, u32, Vec<u8>)>> = Mutex::new(Vec::new());
-    let mut cache = CACHE.lock().unwrap_or_else(|poison| poison.into_inner());
-    if let Some((_, _, bytes)) = cache.iter().find(|(cached_name, cached_flags, _)| cached_name == name && *cached_flags == flags) {
-        return bytes.clone();
+fn shader_cache() -> &'static std::sync::Mutex<Vec<(String, u32, u64, Vec<u8>)>> {
+    static CACHE: std::sync::Mutex<Vec<(String, u32, u64, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+    &CACHE
+}
+
+fn cache_lock() -> std::sync::MutexGuard<'static, Vec<(String, u32, u64, Vec<u8>)>> {
+    shader_cache().lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn cache_get(name: &str, flags: u32, digest: u64) -> Option<Vec<u8>> {
+    let cache = cache_lock();
+    cache.iter().find(|(cached_name, cached_flags, cached_digest, _)| {
+        cached_name == name && *cached_flags == flags && *cached_digest == digest
+    }).map(|(_, _, _, bytes)| bytes.clone())
+}
+
+fn cache_store(name: &str, flags: u32, digest: u64, bytes: Vec<u8>) {
+    let mut cache = cache_lock();
+    if let Some(slot) = cache.iter_mut().find(|(cached_name, cached_flags, cached_digest, _)| {
+        cached_name == name && *cached_flags == flags && *cached_digest == digest
+    }) {
+        slot.3 = bytes;
+    } else {
+        cache.push((name.to_string(), flags, digest, bytes));
     }
-    let digest = shader_digest(source, flags);
+}
+
+fn cache_evict(name: &str, flags: u32, digest: u64) {
+    let mut cache = cache_lock();
+    cache.retain(|(cached_name, cached_flags, cached_digest, _)| {
+        !(cached_name == name && *cached_flags == flags && *cached_digest == digest)
+    });
+}
+
+fn shader_path(name: &str, flags: u32, digest: u64) -> std::path::PathBuf {
     let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("shader-cache");
-    let _ = std::fs::create_dir_all(&path);
     path.push(format!("{name}-{flags:x}-{digest:016x}.bin"));
-    if let Ok(bytes) = std::fs::read(&path) {
-        if bytes.len() > 16 {
-            cache.push((name.to_string(), flags, bytes.clone()));
-            return bytes;
-        }
+    path
+}
+
+/// DXBC container: magic at 0, total size as u32le at offset 24.
+fn dxbc_ok(bytes: &[u8]) -> bool {
+    if bytes.len() < 32 || bytes.len() > u32::MAX as usize {
+        return false;
     }
+    if &bytes[0..4] != b"DXBC" {
+        return false;
+    }
+    let declared = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+    declared == bytes.len() as u32
+}
+
+fn write_shader_file(path: &std::path::Path, bytes: &[u8]) {
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("shader.bin");
+    let tmp = path.with_file_name(format!("{file_name}.tmp.{}", std::process::id()));
+    if std::fs::write(&tmp, bytes).is_err() {
+        return;
+    }
+    // Windows `rename` does not replace an existing destination.
+    let _ = std::fs::remove_file(path);
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::copy(&tmp, path);
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+fn compile_shader_bytes(source: &str, name: &str, flags: u32) -> Vec<u8> {
     let blob = compile_hlsl_flags(source, name, flags);
     let bytes = blob_bytes(blob);
     unsafe { release(blob) };
-    let _ = std::fs::write(&path, &bytes);
-    cache.push((name.to_string(), flags, bytes.clone()));
     bytes
 }
 
-fn create_cs(device: *mut c_void, bytes: &[u8]) -> *mut c_void {
+fn shader_bytes(source: &str, name: &str, flags: u32) -> Vec<u8> {
+    let digest = shader_digest(source, flags);
+    if let Some(bytes) = cache_get(name, flags, digest) {
+        return bytes;
+    }
+    let path = shader_path(name, flags, digest);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = std::fs::read(&path) {
+        if dxbc_ok(&bytes) {
+            cache_store(name, flags, digest, bytes.clone());
+            return bytes;
+        }
+    }
+    let bytes = compile_shader_bytes(source, name, flags);
+    write_shader_file(&path, &bytes);
+    cache_store(name, flags, digest, bytes.clone());
+    bytes
+}
+
+fn try_create_cs(device: *mut c_void, bytes: &[u8]) -> Result<*mut c_void, i32> {
     let mut shader = std::ptr::null_mut();
     let create: unsafe extern "system" fn(*mut c_void, *const u8, usize, *mut c_void, *mut *mut c_void) -> i32 =
         unsafe { vfn(device, 18) };
-    check(
-        unsafe { create(device, bytes.as_ptr(), bytes.len(), std::ptr::null_mut(), &mut shader) },
-        "CreateComputeShader",
-    );
-    shader
+    let hr = unsafe { create(device, bytes.as_ptr(), bytes.len(), std::ptr::null_mut(), &mut shader) };
+    if hr < 0 {
+        if !shader.is_null() {
+            unsafe { release(shader) };
+        }
+        Err(hr)
+    } else {
+        Ok(shader)
+    }
+}
+
+fn create_cs(device: *mut c_void, source: &str, name: &str, flags: u32) -> *mut c_void {
+    let digest = shader_digest(source, flags);
+    let path = shader_path(name, flags, digest);
+    let bytes = shader_bytes(source, name, flags);
+    if let Ok(shader) = try_create_cs(device, &bytes) {
+        return shader;
+    }
+    cache_evict(name, flags, digest);
+    let _ = std::fs::remove_file(&path);
+    let fresh = compile_shader_bytes(source, name, flags);
+    write_shader_file(&path, &fresh);
+    cache_store(name, flags, digest, fresh.clone());
+    match try_create_cs(device, &fresh) {
+        Ok(shader) => shader,
+        Err(hr) => panic!("CreateComputeShader failed with HRESULT 0x{hr:08X} after recompile of {name}"),
+    }
 }
 
 fn create_buffer(device: *mut c_void, bytes: u32, usage: u32, bind: u32, cpu: u32, stride: u32) -> *mut c_void {
@@ -793,16 +884,14 @@ impl GpuEngine {
         if !self.simd_shader.is_null() {
             return;
         }
-        let bytes = shader_bytes(&simd_shader(), "dcc_stress_simd.hlsl", D3DCOMPILE_SKIP_OPTIMIZATION);
-        self.simd_shader = create_cs(self.device, &bytes);
+        self.simd_shader = create_cs(self.device, &simd_shader(), "dcc_stress_simd.hlsl", D3DCOMPILE_SKIP_OPTIMIZATION);
     }
 
     fn ensure_vision(&mut self) {
         if !self.vision_shader.is_null() {
             return;
         }
-        let bytes = shader_bytes(&vision_shader(), "dcc_stress_vision.hlsl", D3DCOMPILE_SKIP_OPTIMIZATION);
-        self.vision_shader = create_cs(self.device, &bytes);
+        self.vision_shader = create_cs(self.device, &vision_shader(), "dcc_stress_vision.hlsl", D3DCOMPILE_SKIP_OPTIMIZATION);
     }
 
     fn ensure_ising(&mut self) {
@@ -813,8 +902,7 @@ impl GpuEngine {
         let _ = std::io::Write::flush(&mut std::io::stdout());
         let source = ising_shader();
         ising_contract(&source);
-        let bytes = shader_bytes(&source, "dcc_stress_ising.hlsl", D3DCOMPILE_SKIP_OPTIMIZATION);
-        self.ising_shader = create_cs(self.device, &bytes);
+        self.ising_shader = create_cs(self.device, &source, "dcc_stress_ising.hlsl", D3DCOMPILE_SKIP_OPTIMIZATION);
     }
 
     unsafe fn upload(&self, buffer: *mut c_void, bytes: *const u8, len: usize) {
@@ -960,8 +1048,7 @@ impl GpuEngine {
             return;
         }
         let source = include_str!("shaders/bitnet_digit.hlsl");
-        let bytes = shader_bytes(source, "bitnet_digit.hlsl", 0);
-        self.bitnet_shader = create_cs(self.device, &bytes);
+        self.bitnet_shader = create_cs(self.device, source, "bitnet_digit.hlsl", 0);
     }
 
     pub fn bitnet(&mut self, pixels: &[f32; 64]) -> BitnetSample {
@@ -1051,6 +1138,48 @@ fn decode_simd(op: u32, words: &[u32]) -> [u8; 16] {
         out[lane] = byte;
     }
     out
+}
+
+#[cfg(test)]
+mod shader_cache_tests {
+    use super::{cache_evict, create_cs, dxbc_ok, shader_bytes, shader_digest, shader_path, GpuEngine};
+
+    const PROBE: &str = "[numthreads(1, 1, 1)] void cs_main(uint3 id : SV_DispatchThreadID) {}\n";
+    const PROBE_NAME: &str = "dcc_cache_probe.hlsl";
+
+    #[test]
+    fn truncated_shader_cache_blob_is_recompiled() {
+        crate::ThermalGovernor::reset();
+        let flags = 0u32;
+        let digest = shader_digest(PROBE, flags);
+        let path = shader_path(PROBE_NAME, flags, digest);
+        cache_evict(PROBE_NAME, flags, digest);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, b"DXBC not a shader").expect("plant truncated blob");
+        let compiled = shader_bytes(PROBE, PROBE_NAME, flags);
+        assert!(dxbc_ok(&compiled), "truncated blob was accepted");
+        let on_disk = std::fs::read(&path).expect("read recompiled blob");
+        assert!(dxbc_ok(&on_disk), "disk blob was not replaced");
+        assert_ne!(on_disk, b"DXBC not a shader");
+
+        let mut junk = vec![0u8; 64];
+        junk[0..4].copy_from_slice(b"DXBC");
+        junk[24..28].copy_from_slice(&64u32.to_le_bytes());
+        assert!(dxbc_ok(&junk), "planted corrupt header should pass the size check");
+        cache_evict(PROBE_NAME, flags, digest);
+        std::fs::write(&path, &junk).expect("plant corrupt dxbc");
+        let engine = GpuEngine::new();
+        let shader = create_cs(engine.device, PROBE, PROBE_NAME, flags);
+        assert!(!shader.is_null());
+        unsafe { super::release(shader) };
+        let repaired = std::fs::read(&path).expect("read repaired blob");
+        assert!(dxbc_ok(&repaired));
+        assert_ne!(repaired, junk);
+        cache_evict(PROBE_NAME, flags, digest);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 pub fn native_lane(op: u32, a: u8, b: u8) -> u8 {

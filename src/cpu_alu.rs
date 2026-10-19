@@ -575,7 +575,6 @@ impl Alu {
             }
         }
         self.jobs += 1;
-        crate::ThermalGovernor::after_contention(1);
         let mut waves = [decode_counts(0, 0); CHANNELS];
         for plane in active_planes(u32::from(mask)) {
             let t_pos = control.t_pos[plane].load(Ordering::Acquire);

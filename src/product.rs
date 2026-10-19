@@ -20,6 +20,7 @@ pub struct DigitQa {
 }
 
 pub fn digit_qa(gpu: &mut GpuEngine) -> DigitQa {
+    crate::ThermalGovernor::reset();
     log("");
     log("==== BitNet 64→16→10  DC-centered digit net ====");
     let (zeros, total) = bitnet::weight_census();
@@ -100,7 +101,7 @@ pub fn digit_qa(gpu: &mut GpuEngine) -> DigitQa {
         if level <= 12 && correct != crate::COOL_DIGIT_TRIALS as u32 {
             band_misses += u64::from(crate::COOL_DIGIT_TRIALS as u32 - correct);
         }
-        if breakdown.is_none() && correct != 40 {
+        if breakdown.is_none() && correct != crate::COOL_DIGIT_TRIALS as u32 {
             breakdown = Some(level);
         }
     }

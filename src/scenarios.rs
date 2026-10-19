@@ -34,18 +34,27 @@ fn elapsed_us(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1.0e6
 }
 
+fn breathe_since(alu: &Alu, jobs_before: u64) {
+    let delta = alu.jobs().saturating_sub(jobs_before);
+    let count = u32::try_from(delta).unwrap_or(u32::MAX);
+    crate::ThermalGovernor::after_contention(count);
+}
+
 fn alu_bits(alu: &mut Alu, op: u8, a: u16, b: u16) -> Result<(u64, u64, f64), String> {
+    let jobs_before = alu.jobs();
     let started = Instant::now();
-    let (got, flags) = match op {
-        0 => alu.add_u16(a, b)?,
-        1 => alu.sub_u16(a, b)?,
-        2 => alu.and_u16(a, b)?,
-        3 => alu.or_u16(a, b)?,
-        4 => alu.xor_u16(a, b)?,
-        5 => alu.not_u16(a)?,
-        _ => alu.cmp_u16(a, b)?,
+    let raced = match op {
+        0 => alu.add_u16(a, b),
+        1 => alu.sub_u16(a, b),
+        2 => alu.and_u16(a, b),
+        3 => alu.or_u16(a, b),
+        4 => alu.xor_u16(a, b),
+        5 => alu.not_u16(a),
+        _ => alu.cmp_u16(a, b),
     };
     let us = elapsed_us(started);
+    breathe_since(alu, jobs_before);
+    let (got, flags) = raced?;
     let (expect, expect_flags) = native_op(op, a, b);
     let mut errors = u64::from((got ^ expect).count_ones());
     errors += flag_mismatches(flags, expect_flags);
@@ -76,6 +85,7 @@ fn native_op(op: u8, a: u16, b: u16) -> (u16, Flags) {
 }
 
 pub fn stress_hostile_os_storm() -> ScenarioReport {
+    crate::ThermalGovernor::reset();
     log("");
     log("==== Scenario 1  cool sentinel pass ====");
     let mut samples = Vec::new();
@@ -162,9 +172,13 @@ pub fn stress_hostile_os_storm() -> ScenarioReport {
 fn run_studio_apps(alu: &mut Alu, samples: &mut Vec<f64>, errors: &mut u64, ops: &mut u64) -> Result<(), String> {
     let (gross, _) = timed(alu, samples, ops, errors, 0, 420, 135)?;
     let (_diff, flags) = {
+        let jobs_before = alu.jobs();
         let started = Instant::now();
-        let pair = alu.cmp_u16(gross, 500)?;
-        samples.push(elapsed_us(started));
+        let pair = alu.cmp_u16(gross, 500);
+        let us = elapsed_us(started);
+        breathe_since(alu, jobs_before);
+        let pair = pair?;
+        samples.push(us);
         *ops += 1;
         pair
     };
@@ -222,9 +236,13 @@ fn run_studio_apps(alu: &mut Alu, samples: &mut Vec<f64>, errors: &mut u64, ops:
         acc = timed(alu, samples, ops, errors, 0, acc, u16::from(byte))?.0;
     }
     let (_gap, hover) = {
+        let jobs_before = alu.jobs();
         let started = Instant::now();
-        let pair = alu.cmp_u16(acc, HYBRID_THRESHOLD)?;
-        samples.push(elapsed_us(started));
+        let pair = alu.cmp_u16(acc, HYBRID_THRESHOLD);
+        let us = elapsed_us(started);
+        breathe_since(alu, jobs_before);
+        let pair = pair?;
+        samples.push(us);
         *ops += 1;
         pair
     };
@@ -252,15 +270,19 @@ fn timed(
     a: u16,
     b: u16,
 ) -> Result<(u16, Flags), String> {
+    let jobs_before = alu.jobs();
     let started = Instant::now();
-    let pair = match op {
-        0 => alu.add_u16(a, b)?,
-        1 => alu.sub_u16(a, b)?,
-        4 => alu.xor_u16(a, b)?,
-        5 => alu.not_u16(a)?,
-        _ => alu.add_u16(a, b)?,
+    let raced = match op {
+        0 => alu.add_u16(a, b),
+        1 => alu.sub_u16(a, b),
+        4 => alu.xor_u16(a, b),
+        5 => alu.not_u16(a),
+        _ => alu.add_u16(a, b),
     };
-    samples.push(elapsed_us(started));
+    let us = elapsed_us(started);
+    breathe_since(alu, jobs_before);
+    let pair = raced?;
+    samples.push(us);
     *ops += 1;
     let (expect, expect_flags) = native_op(op, a, b);
     *errors += u64::from((pair.0 ^ expect).count_ones());
@@ -277,16 +299,20 @@ fn byte_op(
     a: u8,
     b: u8,
 ) -> Result<u8, String> {
+    let jobs_before = alu.jobs();
     let started = Instant::now();
-    let (full, flags) = match op {
-        0 => alu.add_u16(u16::from(a), u16::from(b))?,
-        1 => alu.sub_u16(u16::from(a), u16::from(b))?,
-        2 => alu.and_u16(u16::from(a), u16::from(b))?,
-        3 => alu.or_u16(u16::from(a), u16::from(b))?,
-        4 => alu.xor_u16(u16::from(a), u16::from(b))?,
-        _ => alu.not_u16(u16::from(a))?,
+    let raced = match op {
+        0 => alu.add_u16(u16::from(a), u16::from(b)),
+        1 => alu.sub_u16(u16::from(a), u16::from(b)),
+        2 => alu.and_u16(u16::from(a), u16::from(b)),
+        3 => alu.or_u16(u16::from(a), u16::from(b)),
+        4 => alu.xor_u16(u16::from(a), u16::from(b)),
+        _ => alu.not_u16(u16::from(a)),
     };
-    samples.push(elapsed_us(started));
+    let us = elapsed_us(started);
+    breathe_since(alu, jobs_before);
+    let (full, flags) = raced?;
+    samples.push(us);
     *ops += 1;
     let (expect, expect_flags) = native_op(op, u16::from(a), u16::from(b));
     *errors += u64::from((full ^ expect).count_ones());
@@ -311,6 +337,7 @@ fn native_hybrid() -> (u16, u16, u16, u16) {
 }
 
 pub fn stress_endurance_marathon() -> ScenarioReport {
+    crate::ThermalGovernor::reset();
     log("");
     log("==== Scenario 2  32-cycle endurance ====");
     let mut alu = Alu::new();
@@ -324,12 +351,15 @@ pub fn stress_endurance_marathon() -> ScenarioReport {
     let mut bucket_errors = [0u64; 5];
     let mut zero_abs = [0.0f64; 5];
     for cycle in 0..COOL_ENDURANCE {
+        let jobs_before = alu.jobs();
         let started = Instant::now();
         let pattern = (cycle % 4) as usize;
         let bucket = (cycle / 2000) as usize;
         let wave = match alu.probe(drives[pattern], PEDESTAL) {
             Ok(wave) => wave,
             Err(error) => {
+                let _us = elapsed_us(started);
+                breathe_since(&alu, jobs_before);
                 deadlocks += 1;
                 log(format!("  deadlock at cycle {cycle}: {error}"));
                 break;
@@ -356,6 +386,8 @@ pub fn stress_endurance_marathon() -> ScenarioReport {
         let check = match alu.probe(full.0, full.1) {
             Ok(wave) => wave,
             Err(error) => {
+                let _us = elapsed_us(started);
+                breathe_since(&alu, jobs_before);
                 deadlocks += 1;
                 log(format!("  deadlock at cycle {cycle} full-scale: {error}"));
                 break;
@@ -378,6 +410,7 @@ pub fn stress_endurance_marathon() -> ScenarioReport {
             zero_abs[bucket] = zero_abs[bucket].max(check.y.abs());
         }
         samples.push(elapsed_us(started));
+        breathe_since(&alu, jobs_before);
     }
     log(format!(
         "  bucket 0..{COOL_ENDURANCE}  bit flips {}  zero |Y| {:.3}  plateau Y -0.600 -0.200 +0.200 +0.600",
@@ -402,6 +435,7 @@ pub fn stress_endurance_marathon() -> ScenarioReport {
 }
 
 pub fn stress_concurrent_cpu_gpu_collision() -> ScenarioReport {
+    crate::ThermalGovernor::reset();
     log("");
     log("==== Scenario 3  CPU + UHD ring-bus collision ====");
     let mut alu = Alu::new();
@@ -514,6 +548,7 @@ fn collision_gpu(mut gpu: GpuEngine, templates: [[f32; 64]; 4], weights: [[f32; 
 }
 
 pub fn stress_adversarial_alu_fuzzer() -> ScenarioReport {
+    crate::ThermalGovernor::reset();
     log("");
     log("==== Scenario 4  32-op adversarial fuzzer ====");
     let mut alu = Alu::new();
@@ -618,6 +653,7 @@ pub fn stress_adversarial_alu_fuzzer() -> ScenarioReport {
 }
 
 pub fn stress_vision_noise_cliff_and_zero_fix() -> ScenarioReport {
+    crate::ThermalGovernor::reset();
     log("");
     log("==== Scenario 5  vision noise cliff + empty-grid fix ====");
     let mut gpu = GpuEngine::new();
@@ -722,7 +758,7 @@ pub fn stress_vision_noise_cliff_and_zero_fix() -> ScenarioReport {
         if level <= 12 && correct != COOL_NOISE_TRIALS as u32 {
             errors += u64::from(COOL_NOISE_TRIALS as u32 - correct);
         }
-        if breakdown.is_none() && correct != 40 {
+        if breakdown.is_none() && correct != COOL_NOISE_TRIALS as u32 {
             breakdown = Some(level);
         }
     }
@@ -745,6 +781,7 @@ pub fn stress_vision_noise_cliff_and_zero_fix() -> ScenarioReport {
 }
 
 pub fn stress_pathological_paradox_and_graphs() -> ScenarioReport {
+    crate::ThermalGovernor::reset();
     log("");
     log("==== Scenario 6  paradox rings + frustrated graphs ====");
     let mut samples = Vec::new();
@@ -765,11 +802,13 @@ pub fn stress_pathological_paradox_and_graphs() -> ScenarioReport {
         let mut alu = Alu::new();
         for (label, nodes) in [("3-node", 3usize), ("5-node", 5usize)] {
             for node in 0..nodes {
+                let jobs_before = alu.jobs();
                 let started = Instant::now();
                 match alu.probe([1, -1, 0], 0) {
                     Ok(wave) => {
                         ops += 1;
                         samples.push(elapsed_us(started));
+                        breathe_since(&alu, jobs_before);
                         let finite = wave.y.is_finite() && wave.y == 0.0 && wave.t_pos == 4 && wave.t_neg == 4;
                         log(format!(
                             "  DCC {label} node {node}  counts {}/{}  Y {:+.3}  finite {}",
@@ -780,6 +819,8 @@ pub fn stress_pathological_paradox_and_graphs() -> ScenarioReport {
                         }
                     }
                     Err(error) => {
+                        let _us = elapsed_us(started);
+                        breathe_since(&alu, jobs_before);
                         errors += 1;
                         log(format!("  ring probe failed: {error}"));
                     }
@@ -795,8 +836,10 @@ pub fn stress_pathological_paradox_and_graphs() -> ScenarioReport {
             errors += 1;
         }
         for node in 0..8 {
+            let jobs_before = alu.jobs();
             match alu.probe([0, 0, 0], PEDESTAL) {
                 Ok(wave) => {
+                    breathe_since(&alu, jobs_before);
                     ops += 1;
                     let ok = wave.t_pos == PEDESTAL
                         && wave.t_neg == PEDESTAL
@@ -814,6 +857,7 @@ pub fn stress_pathological_paradox_and_graphs() -> ScenarioReport {
                     }
                 }
                 Err(error) => {
+                    breathe_since(&alu, jobs_before);
                     errors += 1;
                     log(format!("  pedestal probe failed: {error}"));
                 }
@@ -1008,6 +1052,7 @@ fn argmax(scores: [f64; 4]) -> i32 {
 }
 
 pub fn eval_script(script: i32) -> Result<i32, String> {
+    crate::ThermalGovernor::reset();
     let mut alu = Alu::new();
     let mut samples = Vec::new();
     let mut errors = 0u64;
@@ -1026,9 +1071,13 @@ pub fn eval_script(script: i32) -> Result<i32, String> {
 
 fn script_tax(alu: &mut Alu, samples: &mut Vec<f64>, errors: &mut u64, ops: &mut u64) -> Result<i32, String> {
     let (gross, _) = timed(alu, samples, ops, errors, 0, 420, 135)?;
+    let jobs_before = alu.jobs();
     let started = Instant::now();
-    let (diff, flags) = alu.cmp_u16(gross, 500)?;
-    samples.push(elapsed_us(started));
+    let raced = alu.cmp_u16(gross, 500);
+    let us = elapsed_us(started);
+    breathe_since(alu, jobs_before);
+    let (diff, flags) = raced?;
+    samples.push(us);
     *ops += 1;
     let (expect_diff, expect_flags) = native_sub_flags(gross, 500);
     *errors += u64::from((diff ^ expect_diff).count_ones());

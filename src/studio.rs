@@ -116,7 +116,7 @@ pub fn launch() {
 
 fn paradox_line() -> String {
     let mut alu = Alu::new();
-    match alu.probe([1, -1, 0], 0) {
+    let line = match alu.probe([1, -1, 0], 0) {
         Ok(wave) => format!(
             "3-node ring  counts {}/{}  Y {:+.3}  {}",
             wave.t_pos,
@@ -125,7 +125,9 @@ fn paradox_line() -> String {
             if wave.y == 0.0 && wave.y.is_finite() { "BOTH / PARADOX" } else { "UNRESOLVED" }
         ),
         Err(error) => format!("paradox probe failed: {error}"),
-    }
+    };
+    aether_dcc_sdk::ThermalGovernor::after_contention(u32::try_from(alu.jobs()).unwrap_or(u32::MAX));
+    line
 }
 
 fn ghost_text(gpu: &mut GpuEngine, pixels: &[f32; 64]) -> (String, f64) {
