@@ -92,6 +92,8 @@ On the release host, script `0` returned `622`, script `1` returned `0`, and scr
 
 The theory and the drift-cancellation proof are in [WHITE_PAPER.md](WHITE_PAPER.md).
 
+Phase 2 is a native differential-contention cell, specified in [HARDWARE_PAPER.md](HARDWARE_PAPER.md). The synthesizable reference is [rtl/dcc_arbiter.v](rtl/dcc_arbiter.v): a clocked two-rail counter and a shift-add decoder for \(Y = (t_{\mathrm{pos}} - t_{\mathrm{neg}}) / (t_{\mathrm{pos}} + t_{\mathrm{neg}})\), with no multiplier. No DCC-ASIC has been fabricated. Every latency, BER, and energy figure in this README was measured on the software SDK.
+
 ## Benchmark
 
 Host: Intel i5-10210U, DXGI adapter `Intel(R) UHD Graphics`, vendor `0x8086`, device `0x9B41`, feature level 11.1. The cool table is `cargo run --release -- --product-benchmark` on 2026-10-19 after the follow-up fixes (exit 0; Cargo `Finished` in 1.22 s on the rebuild; stopwatch 2.209 s including that compile). Latencies are microseconds. The retired table under it is the earlier long hostile campaign of 2026-10-18. That campaign is not what the command prints now.
